@@ -1,0 +1,38 @@
+#!/bin/bash
+# Two gates before anything leaves this Mac for the fork.
+#
+# 1. No direct push to main. Changes reach main through a pull request Stelios merges.
+# 2. No push to a branch whose pull request is already merged. A commit pushed to a
+#    merged branch is orphaned: it never reaches main and nobody sees it.
+#
+# Installed with: git config core.hooksPath .githooks
+# Bypass, when you genuinely mean it: git push --no-verify
+
+set -uo pipefail
+
+remote="$1"
+z40=0000000000000000000000000000000000000000
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$z40" ] && continue          # a branch deletion, let it through
+  branch="${remote_ref#refs/heads/}"
+
+  if [ "$branch" = "main" ]; then
+    echo "pre-push: refusing to push straight to main on $remote." >&2
+    echo "          Open a pull request instead; Stelios merges it." >&2
+    echo "          If you mean it: git push --no-verify" >&2
+    exit 1
+  fi
+
+  if command -v gh >/dev/null 2>&1; then
+    state=$(gh pr view "$branch" --json state --jq .state 2>/dev/null || true)
+    if [ "$state" = "MERGED" ]; then
+      echo "pre-push: the pull request for '$branch' is already MERGED." >&2
+      echo "          This commit would be orphaned and never reach main." >&2
+      echo "          Branch fresh off main and open a new pull request." >&2
+      exit 1
+    fi
+  fi
+done
+
+exit 0
