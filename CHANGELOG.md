@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.32.1](https://github.com/steliospaps7/career-ops/compare/career-ops-v1.32.0...career-ops-v1.32.1) (2026-09-03)
+
+
+### Bug Fixes
+
+* **tests:** pass --confirm to apply in the local-paths regression leg ([#3755](https://github.com/steliospaps7/career-ops/issues/3755)) ([e979d4e](https://github.com/steliospaps7/career-ops/commit/e979d4e04c35807a3905ebfb3cc87f8d621192ce))
+
 ## [1.32.0](https://github.com/career-ops-hq/career-ops/compare/career-ops-v1.31.0...career-ops-v1.32.0) (2026-09-03)
 
 
