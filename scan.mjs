@@ -2278,6 +2278,206 @@ export function appendScanRunSummary(c, filePath = SCAN_RUNS_PATH) {
   appendFileSync(filePath, row, 'utf-8');
 }
 
+// ── Per-source ledger ───────────────────────────────────────────────
+//
+// The run summary above is one row per RUN, so "twenty-one sources are
+// configured" and "twenty-one sources were read" look identical from the
+// outside. The ledger below is the same arithmetic kept per source, so a board
+// that has gone quiet, a board that errored and a board whose every row failed
+// one filter are three different lines instead of one total.
+//
+// It is bookkeeping on paths that already exist: every call sits beside the
+// run total it mirrors, so a new drop reason cannot be counted in one place
+// and missed in the other. reconcileSourceLedger() is the assertion that says
+// so, and it runs on every real scan, not only in the suite.
+
+// Drop reasons in SWEEP ORDER — the order the filters actually run in, so a
+// line reads like the journey a posting took. Each carries the label printed
+// in the terminal and written to the log.
+export const SOURCE_DROP_REASONS = [
+  { key: 'blacklist', label: 'blacklist' },
+  { key: 'title', label: 'title' },
+  { key: 'tier', label: 'tier' },
+  { key: 'location', label: 'location' },
+  { key: 'age', label: 'age' },
+  { key: 'postedDate', label: 'posted date' },
+  { key: 'salary', label: 'salary' },
+  { key: 'content', label: 'content' },
+  { key: 'countryEligibility', label: 'country' },
+  { key: 'visa', label: 'visa' },
+  { key: 'duplicate', label: 'duplicate' },
+  { key: 'cooldown', label: 'cooldown' },
+];
+
+const SOURCE_DROP_KEYS = new Set(SOURCE_DROP_REASONS.map((r) => r.key));
+
+// Its own file, not extra columns on scan-runs.tsv: that file is one row per
+// run and its header is guarded by a drift test other modules read, so
+// widening it would break a contract for a different shape of data. The
+// timestamp is the same string the run-summary row carries, so the two join.
+export const SCAN_SOURCES_PATH = process.env.CAREER_OPS_SCAN_SOURCES
+  || path.join(DATA_ROOT, 'data/scan-sources.tsv');
+export const SCAN_SOURCES_HEADER = 'timestamp\tsource\tkind\tpaid\tstatus\tfound\tkept\tdropped\tdrop_reasons\tdetail\n';
+
+/**
+ * One record per source for the current run. Registration is separate from
+ * counting on purpose: a source that errors, or that no provider matched, has
+ * a line of its own rather than vanishing from the list.
+ */
+export function createSourceLedger() {
+  /** @type {Map<string, any>} */
+  const records = new Map();
+
+  const get = (name) => {
+    const record = records.get(name);
+    if (!record) throw new Error(`source ledger: "${name}" was never registered`);
+    return record;
+  };
+
+  return {
+    register(name, { kind = 'company', paid = false } = {}) {
+      let record = records.get(name);
+      if (!record) {
+        record = {
+          name, kind, paid, status: null, detail: '',
+          found: 0, kept: 0, dropped: 0, reasons: {},
+        };
+        records.set(name, record);
+      }
+      return record;
+    },
+    /** Mark what the source is, once the provider that will read it is known. */
+    describe(name, { kind, paid } = {}) {
+      const record = get(name);
+      if (kind !== undefined) record.kind = kind;
+      if (paid !== undefined) record.paid = paid;
+      return record;
+    },
+    found(name, count) {
+      get(name).found += count;
+    },
+    keep(name) {
+      get(name).kept += 1;
+    },
+    drop(name, reasonKey) {
+      if (!SOURCE_DROP_KEYS.has(reasonKey)) {
+        throw new Error(`source ledger: unknown drop reason "${reasonKey}"`);
+      }
+      const record = get(name);
+      record.dropped += 1;
+      record.reasons[reasonKey] = (record.reasons[reasonKey] || 0) + 1;
+    },
+    error(name, message) {
+      const record = get(name);
+      record.status = 'error';
+      // Collapsed to one line: a child process's stderr arrives inside the
+      // message, and a newline mid-detail breaks the column the eye reads down.
+      record.detail = String(message || 'unknown error').replace(/\s+/g, ' ').trim();
+    },
+    skipped(name, message) {
+      const record = get(name);
+      record.status = 'skipped';
+      record.detail = String(message || 'no provider matched');
+    },
+    /** One record, status resolved. Used to print a source's line the moment it finishes. */
+    record(name) {
+      const r = get(name);
+      return { ...r, status: r.status || (r.found === 0 ? 'empty' : 'ok') };
+    },
+    /** Registration order, with the status resolved for anything not already set. */
+    records() {
+      return [...records.values()].map((r) => ({
+        ...r,
+        status: r.status || (r.found === 0 ? 'empty' : 'ok'),
+      }));
+    },
+  };
+}
+
+/**
+ * The per-source totals must sum to the run totals. This is the check that
+ * catches a future drop reason added to the run counters and forgotten in the
+ * breakdown — the failure mode the ledger exists to prevent.
+ *
+ * @param {ReturnType<createSourceLedger>} ledger
+ * @param {Record<string, number>} runTotals - found, kept and one key per drop reason
+ * @returns {Array<{field: string, ledger: number, run: number}>} named mismatches; empty when they agree
+ */
+export function reconcileSourceLedger(ledger, runTotals) {
+  const records = ledger.records();
+  const sum = (fn) => records.reduce((total, r) => total + fn(r), 0);
+  const mismatches = [];
+  const check = (field, ledgerValue) => {
+    const runValue = runTotals[field] ?? 0;
+    if (ledgerValue !== runValue) mismatches.push({ field, ledger: ledgerValue, run: runValue });
+  };
+  check('found', sum((r) => r.found));
+  check('kept', sum((r) => r.kept));
+  for (const { key } of SOURCE_DROP_REASONS) {
+    check(key, sum((r) => r.reasons[key] || 0));
+  }
+  return mismatches;
+}
+
+/**
+ * One terminal line for one source. Presentation only — column padding will
+ * change, so nothing asserts on the exact spacing, only on the fields.
+ */
+export function formatSourceLine(record) {
+  const name = String(record.name).padEnd(24);
+  const paid = record.paid ? '  [paid]' : '';
+  if (record.status === 'error') return `${name}${'ERROR'.padEnd(11)}${record.detail}${paid}`;
+  if (record.status === 'skipped') return `${name}${'SKIPPED'.padEnd(11)}${record.detail}${paid}`;
+  const reasons = SOURCE_DROP_REASONS
+    .filter(({ key }) => record.reasons[key])
+    .map(({ key, label }) => `${label} ${record.reasons[key]}`)
+    .join(', ');
+  const detail = reasons ? `(${reasons})` : (record.found === 0 ? '(no postings returned)' : '');
+  const dropped = record.dropped > 0 ? `dropped ${record.dropped}` : '—';
+  return (
+    name
+    + `found ${record.found}`.padEnd(11)
+    + `kept ${record.kept}`.padEnd(10)
+    + dropped.padEnd(12)
+    + detail.padEnd(paid ? 30 : 0)
+    + paid
+  ).trimEnd();
+}
+
+/**
+ * Append one row per source for this run. The header is written once, when the
+ * file is created.
+ *
+ * @param {Array<object>} records - from ledger.records()
+ * @param {string} timestamp - the SAME string the run-summary row carries
+ * @param {string} [filePath]
+ */
+export function appendScanSources(records, timestamp, filePath = SCAN_SOURCES_PATH) {
+  if (!Array.isArray(records) || records.length === 0) return;
+  mkdirSync(path.dirname(filePath), { recursive: true });
+  if (!existsSync(filePath)) atomicWriteFile(filePath, SCAN_SOURCES_HEADER);
+  let lines = '';
+  for (const r of records) {
+    const reasons = SOURCE_DROP_REASONS
+      .filter(({ key }) => r.reasons[key])
+      .map(({ key, label }) => `${label}=${r.reasons[key]}`)
+      .join(' ');
+    lines += [
+      timestamp,
+      sanitizeTsvField(r.name),
+      r.kind,
+      r.paid ? 'paid' : 'free',
+      r.status,
+      r.found,
+      r.kept,
+      r.dropped,
+      reasons,
+      sanitizeTsvField(r.detail),
+    ].join('\t') + '\n';
+  }
+  appendFileSync(filePath, lines, 'utf-8');
+}
+
 // ── Portal health persistence (#1744) ───────────────────────────────
 
 // Anchored to the data root (#3510), read by stats.mjs:39 at the same anchor.
@@ -2490,14 +2690,14 @@ function guardStatusFor(code) {
 const KNOWN_FLAGS = [
   '--dry-run', '--verify', '--headed-fallback', '--throttle', '--rediscover-404',
   '--include-blacklisted', '--company', '--posted-after', '--posted-before',
-  '--since', '--quiet', '--json', '--help', '-h',
+  '--since', '--quiet', '--json', '--help', '-h', '--source-log',
 ];
 
 // Flags whose space-separated value is the NEXT argv token (the `--flag=value`
 // form is self-contained and never needs this). --throttle is deliberately
 // excluded: only its bare and `--throttle=<ms>` forms are read below, so a
 // following token is never its value.
-const VALUE_FLAGS = ['--company', '--posted-after', '--posted-before', '--since'];
+const VALUE_FLAGS = ['--company', '--posted-after', '--posted-before', '--since', '--source-log'];
 
 const USAGE = `Usage:
   node scan.mjs                              # scan all enabled companies
@@ -2512,6 +2712,7 @@ const USAGE = `Usage:
   node scan.mjs --since 7                    # postings from the last 7 days
   node scan.mjs --posted-after 2026-07-01    # absolute lower bound on posting date
   node scan.mjs --posted-before 2026-08-01   # absolute upper bound on posting date
+  node scan.mjs --source-log <path>          # write the per-source rows here instead of data/scan-sources.tsv
   node scan.mjs --json                       # emit one machine-readable receipt on stdout
   node scan.mjs --quiet                      # suppress the manifesto footer
   node scan.mjs --help                       # print this usage block and exit`;
@@ -2557,6 +2758,11 @@ async function main() {
     return value;
   };
   const filterCompany = requireValue('--company')?.toLowerCase() ?? null;
+  // --source-log <path>: where the per-source rows go. The double-click file
+  // passes a fixed path outside the checkout, because $TMPDIR differs between
+  // a sandboxed and an unsandboxed shell and a log written by one is not the
+  // log read by the other.
+  const sourceLogPath = requireValue('--source-log') ?? SCAN_SOURCES_PATH;
   // --posted-after / --posted-before <YYYY-MM-DD>: absolute-date bounds on the
   // employer's real posting date (job.postedAt), gated against a typo since a
   // silently-ignored bound would look like "no jobs matched" instead of an error.
@@ -2655,6 +2861,10 @@ async function main() {
 
   // 3. Resolve a provider for each enabled company / board
   const targets = [];
+  // One record per enabled source, registered here rather than in the sweep so
+  // that a source no provider matched, and one whose config is broken, each get
+  // a line of their own. Silence is never the same as absence.
+  const sourceLedger = createSourceLedger();
   let skippedCount = 0;
   let boardCount = 0;
   const resolveErrors = [];
@@ -2676,9 +2886,13 @@ async function main() {
       }
       if (filterCompany && !entry.name.toLowerCase().includes(filterCompany)) continue;
 
+      const kind = isBoard ? 'board' : 'company';
+      sourceLedger.register(entry.name, { kind });
+
       const resolved = resolveProvider(entry, providers);
       if (!resolved) {
         skippedCount++;
+        sourceLedger.skipped(entry.name, 'no provider matched');
         if (entry.scan_method === 'websearch') {
           agentHandoff.push({
             company: entry.name,
@@ -2691,9 +2905,14 @@ async function main() {
 
       if (resolved.error) {
         resolveErrors.push({ company: entry.name, error: resolved.error });
+        sourceLedger.error(entry.name, resolved.error);
         continue;
       }
 
+      // The paid marker is derived, never configured: a source read through the
+      // apify plugin is one that spends money, so the yield and the spend show
+      // up in the same glance.
+      sourceLedger.describe(entry.name, { paid: resolved.provider.id === 'apify' });
       targets.push({ ...entry, _provider: resolved.provider, _isBoard: isBoard });
       if (isBoard) boardCount++;
     }
@@ -2709,7 +2928,17 @@ async function main() {
   parts.push(`${localParserCount} local parser`);
   parts.push(`${skippedCount} skipped — no provider matched`);
   console.log(`Scanning ${parts.join('; ')} via providers`);
-  if (dryRun) console.log('(dry run — no files will be written)\n');
+  if (dryRun) console.log('(dry run — no files will be written)');
+
+  // One line per source, printed as each finishes. The sources nothing could
+  // read are settled already, so they lead — a board with a broken entry is
+  // visible before the sweep rather than missing from the list afterwards.
+  console.log('\nSources:');
+  for (const record of sourceLedger.records()) {
+    if (record.status === 'skipped' || record.status === 'error') {
+      console.log(formatSourceLine(record));
+    }
+  }
 
   // 3.5. Load the user's do-not-apply list (#1742). Opt-in: absent file =
   // empty Map = the filter below never fires.
@@ -2814,6 +3043,7 @@ async function main() {
         throw new Error(`${provider.id}: fetch() did not return an array`);
       }
       totalFound += jobs.length;
+      sourceLedger.found(company.name, jobs.length);
       if (!company._isBoard && jobs.length === 0) {
         emptyTargets.push(company.name);
       }
@@ -2834,6 +3064,7 @@ async function main() {
           if (blEntry) {
             if (!includeBlacklisted) {
               totalFilteredBlacklist++;
+              sourceLedger.drop(company.name, 'blacklist');
               continue;
             }
             annotatedBlacklisted++;
@@ -2847,55 +3078,67 @@ async function main() {
 
         if (!titleFilter(job.title)) {
           totalFilteredTitle++;
+          sourceLedger.drop(company.name, 'title');
           continue;
         }
         if (classifyTier && skipTiers.includes(classifyTier(job.title))) {
           totalFilteredTier++;
+          sourceLedger.drop(company.name, 'tier');
           continue;
         }
         // job.title is passed so a role whose remoteness is stated in the title
         // ("Program Manager - Remote") isn't rejected for a city-only location.
         if (!locationFilter(job.location, job.url, job.title)) {
           totalFilteredLocation++;
+          sourceLedger.drop(company.name, 'location');
           continue;
         }
         if (!postingAgeFilter(job.postedAt)) {
           totalFilteredPostingAge++;
+          sourceLedger.drop(company.name, 'age');
           continue;
         }
         if (!postedDateFilter(job.postedAt)) {
           totalFilteredPostedDate++;
+          sourceLedger.drop(company.name, 'postedDate');
           continue;
         }
         if (!salaryFilter(job.salary)) {
           totalFilteredSalary++;
+          sourceLedger.drop(company.name, 'salary');
           continue;
         }
         if (!contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
           totalFilteredContent++;
+          sourceLedger.drop(company.name, 'content');
           continue;
         }
         if (!countryEligibilityFilter(job.description)) {
           totalFilteredCountryEligibility++;
+          sourceLedger.drop(company.name, 'countryEligibility');
           continue;
         }
         if (!visaFilter(job.description)) {
           totalFilteredVisa++;
+          sourceLedger.drop(company.name, 'visa');
           continue;
         }
         const dedupUrl = normalizeUrlForDedup(job.url);
         if (seenUrls.has(dedupUrl)) {
           totalDupes++;
+          sourceLedger.drop(company.name, 'duplicate');
           continue;
         }
         const key = companyRoleDedupKey(job.company, job.title, canonicalizeCompany);
         if (seenCompanyRoles.has(key)) {
           totalDupes++;
+          sourceLedger.drop(company.name, 'duplicate');
           continue;
         }
         const cooldownResult = cooldownFilter(job);
         if (cooldownResult.skip) {
           totalFilteredCooldown++;
+          sourceLedger.drop(company.name, 'cooldown');
           cooldownOffers.push({
             job: { ...job, source: sourceName },
             status: cooldownResult.reason,
@@ -2909,6 +3152,7 @@ async function main() {
         // rediscovery fallback. A null domain (no careers_url) marks the offer
         // as broad-discovery — ineligible for the fallback, per the issue scope.
         const careersUrlDomain = extractCareersUrlDomain(company.careers_url);
+        sourceLedger.keep(company.name);
         newOffers.push({
           ...job,
           source: sourceName,
@@ -2922,10 +3166,42 @@ async function main() {
         error: err.message,
         kind: classifyFetchError(err),
       });
+      sourceLedger.error(company.name, err.message);
     }
+    // Printed the moment this source finishes, not in a block at the end, so a
+    // long sweep shows progress instead of a blank screen. Order is therefore
+    // completion order; the columns still read down the screen.
+    console.log(formatSourceLine(sourceLedger.record(company.name)));
   });
 
   await parallelFetch(tasks, CONCURRENCY);
+
+  // The per-source totals must sum to the run totals. Checked on every real
+  // run, not only in the suite: a drop reason added to the counters above and
+  // forgotten in the ledger is exactly the silent divergence this catches.
+  const ledgerMismatches = reconcileSourceLedger(sourceLedger, {
+    found: totalFound,
+    kept: newOffers.length,
+    blacklist: totalFilteredBlacklist,
+    title: totalFilteredTitle,
+    tier: totalFilteredTier,
+    location: totalFilteredLocation,
+    age: totalFilteredPostingAge,
+    postedDate: totalFilteredPostedDate,
+    salary: totalFilteredSalary,
+    content: totalFilteredContent,
+    countryEligibility: totalFilteredCountryEligibility,
+    visa: totalFilteredVisa,
+    duplicate: totalDupes,
+    cooldown: totalFilteredCooldown,
+  });
+  if (ledgerMismatches.length > 0) {
+    console.error(
+      `\n⚠️  Per-source counts do not sum to the run totals: `
+      + `${ledgerMismatches.map((m) => `${m.field} ${m.ledger} vs ${m.run}`).join(', ')}. `
+      + `The run summary is correct; the per-source breakdown below is short by that much.`,
+    );
+  }
 
   // 5.5. Optional liveness verification — drop expired and guard-rejected postings
   let verifiedOffers = newOffers;
@@ -3201,8 +3477,12 @@ async function main() {
   // writes; a --dry-run must leave no trace.
   if (!dryRun) {
     await appendPortalHealth(healthRecords);
+    // One timestamp for both writes, so a per-source row joins its run-summary
+    // row on an exact string match rather than on two clocks agreeing.
+    const runTimestamp = new Date().toISOString();
+    appendScanSources(sourceLedger.records(), runTimestamp, sourceLogPath);
     appendScanRunSummary({
-      timestamp: new Date().toISOString(), status: 'completed',
+      timestamp: runTimestamp, status: 'completed',
       companies: summaryCompanies, boards: summaryBoards, found: totalFound,
       filteredTitle: totalFilteredTitle, filteredTier: totalFilteredTier,
       filteredLocation: totalFilteredLocation, filteredPostingAge: totalFilteredPostingAge,
