@@ -60,7 +60,7 @@ After this, "which boards were read this morning" is answered by looking at the 
 24. As Stelios, I want the app's four-system Scan button labelled as an extra, so that nobody mistakes it for the full scan again.
 25. As Stelios, I want the label to say which four it reads, so that the difference is concrete rather than a warning.
 26. As Stelios, I want the run to work when a source is switched off, so that turning one off is a one-line edit and not a code change.
-27. As a future session, I want the per-source counts available in the scan's machine-readable output, so that the app can show them without parsing the terminal.
+27. As Stelios, I want the log at a fixed path outside the tool's folder, so that a run written by one shell is the run I read from another.
 28. As a future session, I want the per-source work to sit in the scanner rather than the double-click file, so that it is covered by the test suite.
 29. As Stelios, I want the double-click file to hold no logic worth testing, so that there is nothing in it that can be silently wrong.
 30. As Stelios, I want the test suite to stay green before anything is pushed, so that the pull request is not the place the problem is found.
@@ -110,19 +110,27 @@ detect, is discovered by the same directory scan as the other ninety-four, and r
 normalised shape. It maps a posting date, because a reader that omits one silently disables the age
 filter for every role it returns.
 
-**The a16z Speedrun reader is switched on rather than retired.** The plan assumed no reader existed
-and moved it to the recruiter pack. A complete, tested reader is already in the tree, covering a
-zero-auth public feed across roughly two hundred portfolio companies, and it is referenced nowhere
-in the source list. Enabling it is a configuration entry, not code, and it is the cheapest breadth
-available. It goes in as a job board entry and the existing London location filter and posting-age
-limit do the cutting; a small number of London rows is the expected result and is not a fault. The
-talent-network sign-up remains a hand task in the recruiter pack, separate from the scan.
+**The a16z Speedrun reader is switched on.** The tree already carries a complete, tested reader for
+Speedrun's public job feed, roughly two hundred portfolio companies with no login, and nothing in
+the source list points at it. It goes in as a job board entry, and the existing London location
+filter and posting-age limit do the cutting; a small number of London rows is the expected result
+and is not a fault. The talent-network sign-up is a separate hand task in the recruiter pack.
 
 **The lock file is ignored.** The lock the fork uses to stop two sessions editing at once sits
 untracked in a public repository. It joins the ignore list on the build branch.
 
-**The machine-readable receipt gains the per-source array additively.** Its version string stays as
-it is; consumers read named keys, and no existing key changes meaning.
+**The logs live at a fixed path outside the fork.** The `.command` file tees the terminal output to
+`projects/career/career-ops/logs/scan-<date>.log`, and the scanner writes the per-source rows to
+`projects/career/career-ops/logs/scan-sources.tsv`, the path passed in by the `.command` file. Both
+sit beside the file that starts the run, never under a temporary directory, because the sandboxed
+and unsandboxed shells resolve that directory differently and a log written by one is invisible to
+the other.
+
+**The run states its cost and starts.** One daily run of the two paid readers costs up to about 90
+cents: Indeed at six searches of 25 adverts at half a cent each, up to 75 cents on a day when every
+search fills; LinkedIn at the same volume at a tenth of a cent, about 15 cents. About USD 25 a month
+at the ceiling. The `.command` file prints that figure as its first line and runs without a
+confirmation prompt, so the morning double-click stays one action and the spend is never a surprise.
 
 **The app's Scan button is relabelled, not changed.** Its description gains a sentence naming it as
 an extra covering four applicant systems and pointing at the double-click file for the full scan.
@@ -131,9 +139,9 @@ No behaviour changes.
 ## Testing Decisions
 
 A good test here asserts what the scan reports, never how it counted. The counters are internal;
-the observable behaviour is the per-source record on the summary object, the rows in the per-source
-log, and the array on the machine-readable receipt. Tests drive the scanner with fixture sources and
-fixture postings and read those three outputs. No test asserts on terminal formatting beyond the
+the observable behaviour is the per-source record on the summary object and the rows in the
+per-source log. Tests drive the scanner with fixture sources and fixture postings and read those two
+outputs. No test asserts on terminal formatting beyond the
 fields being present, because column padding is presentation and will change.
 
 **The scanner.** Given two sources and a set of postings that fail different filters, the per-source
@@ -142,9 +150,10 @@ to the run totals. That last assertion is the one that catches a new drop reason
 and forgotten in the breakdown. A source returning nothing records zero found rather than being
 absent. A source that throws records an error and does not abort the run or the other sources.
 
-**The per-source log.** Its header is asserted the way the run-summary header already is, by a drift
-test, since the same class of breakage applies. A run appends one row per enabled source and joins
-to the run summary on the timestamp.
+**The per-source log.** A run appends one row per enabled source, with a header written once when
+the file is created, and joins to the run summary on the timestamp. No drift test: the file has one
+reader, this ticket, and a guard for a contract nobody else depends on is weight the day does not
+have.
 
 **The Jack and Jill reader.** Tested at the provider seam against a recorded response fixture, in the
 shape the existing provider tests use, with `a16z-speedrun-talent` as the closest prior art. Assert
@@ -160,6 +169,15 @@ once by hand and reading what it printed.
 The suite runs outside the sandbox. Inside, it fails while copying the fork's own command files into
 a temporary directory, which is a sandbox restriction and not a test failure. Baseline on a clean
 tree at the time of writing: 8,094 passed, 0 failed, 12 warnings.
+
+## Done When
+
+One morning run from the double-click prints a line for every enabled source, the two paid readers
+and Speedrun among them, with the cost line first; `projects/career/career-ops/logs/scan-sources.tsv`
+holds one row per source for that run; the app opens on the pipeline showing the rows the run added;
+`portals.yml` carries no `search_queries` key and validates; the Jack and Jill reader returns a
+posting date on a real response; and `test-all --quick` was green outside the sandbox before the
+push. One pull request, open, not merged.
 
 ## Out of Scope
 
