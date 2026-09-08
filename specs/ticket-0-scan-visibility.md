@@ -181,6 +181,10 @@ push. One pull request, open, not merged.
 
 ## Out of Scope
 
+The Apify plugin's missing posting date: `plugins/apify/index.mjs` maps five fields and no date,
+so both paid readers return undated rows and the age filter never fires on them. The per-source
+lines will show it on the first run as "age 0 removed" against Indeed and LinkedIn, and that is the
+plugin, not this ticket. It is the upstream `postedAt` pull request already listed in `TICKETS.md`.
 Scheduled or unattended scans, which stay parked until a month of daily double-clicks shows a role
 missed because of the hour it was posted. Reading the full advert, which is the next ticket and is
 what makes the filters bite. Any change to the filters themselves, to the scoring, or to what the
