@@ -68,6 +68,8 @@ const {
   const expected = [
     'blacklist', 'title', 'tier', 'location', 'age', 'postedDate',
     'salary', 'content', 'countryEligibility', 'visa', 'duplicate', 'cooldown',
+    // --verify runs after the whole sweep, so its drops come last.
+    'expired',
   ];
   if (JSON.stringify(keys) === JSON.stringify(expected)) {
     pass('SOURCE_DROP_REASONS carries every sweep filter, in sweep order');
@@ -129,6 +131,50 @@ const {
   } else {
     fail(`quiet line = ${JSON.stringify(quietLine)}`);
   }
+}
+
+// ── 2b. A degraded source, and a keep the verify pass takes back ────────────
+{
+  const ledger = createSourceLedger();
+  ledger.register('Fallback board', { kind: 'company' });
+  ledger.found('Fallback board', 2);
+  ledger.keep('Fallback board');
+  ledger.keep('Fallback board');
+  ledger.degraded('Fallback board', 'local parser failed, used greenhouse API fallback: boom');
+
+  const record = ledger.record('Fallback board');
+  if (record.status === 'degraded' && record.found === 2 && record.kept === 2) {
+    pass('a source rescued by the API fallback keeps its real counts and is not reported as ok');
+  } else {
+    fail(`degraded record = ${JSON.stringify(record)}`);
+  }
+  const line = formatSourceLine(record);
+  if (/DEGRADED/.test(line) && /local parser failed/.test(line) && /found 2/.test(line)) {
+    pass('the terminal line for a degraded source shows the counts and names the fault');
+  } else {
+    fail(`degraded line = ${JSON.stringify(line)}`);
+  }
+
+  // The verify pass drops a posting the sweep had already counted as kept.
+  ledger.unkeep('Fallback board');
+  ledger.drop('Fallback board', 'expired');
+  const after = ledger.record('Fallback board');
+  if (after.kept === 1 && after.dropped === 1 && after.reasons.expired === 1) {
+    pass('a verify drop moves a posting out of kept and into the expired reason');
+  } else {
+    fail(`after unkeep = ${JSON.stringify(after)}`);
+  }
+  // The row must still balance: kept + dropped can never exceed what was found.
+  if (after.kept + after.dropped === after.found) {
+    pass('the row still balances after a verify drop');
+  } else {
+    fail(`kept ${after.kept} + dropped ${after.dropped} != found ${after.found}`);
+  }
+  // unkeep never runs a source negative, even if called more often than kept.
+  ledger.unkeep('Fallback board');
+  ledger.unkeep('Fallback board');
+  if (ledger.record('Fallback board').kept === 0) pass('unkeep floors at zero');
+  else fail(`kept went negative: ${ledger.record('Fallback board').kept}`);
 }
 
 // ── 3. The per-source log: one row per source per run, header written once ───
@@ -283,6 +329,75 @@ tracked_companies:
   } catch (err) {
     fail(`end-to-end ledger scan failed: ${err.message}`);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// ── 5. A failed run still writes its per-source rows ─────────────────────────
+//
+// A run that dies mid-sweep wrote a scan-runs row and no per-source rows, so
+// the one run where the breakdown matters most — which sources had been read
+// before it died, and which never got their turn — had no breakdown at all.
+{
+  const { registerRunFailureSnapshot, writeRunFailureRow } = await import(
+    pathToFileURL(join(ROOT, 'scan.mjs')).href
+  );
+  const dir = mkdtempSync(join(tmpdir(), 'scan-failrows-'));
+  try {
+    const runsPath = join(dir, 'scan-runs.tsv');
+    const logPath = join(dir, 'logs', 'scan-sources.tsv');
+
+    const ledger = createSourceLedger();
+    ledger.register('Read before the crash', { kind: 'board' });
+    ledger.register('Never reached', { kind: 'board' });
+    ledger.found('Read before the crash', 3);
+    ledger.keep('Read before the crash');
+    ledger.drop('Read before the crash', 'title');
+
+    registerRunFailureSnapshot(
+      () => ({
+        timestamp: new Date().toISOString(),
+        companies: 2, boards: 0, found: 3,
+        filteredTitle: 1, filteredTier: 0, filteredLocation: 0, filteredPostingAge: 0,
+        filteredSalary: 0, filteredContent: 0, filteredCooldown: 0,
+        dupes: 0, newAdded: 0, errors: 0,
+      }),
+      (timestamp) => appendScanSources(ledger.records(), timestamp, logPath),
+    );
+
+    const wrote = writeRunFailureRow('failed', runsPath);
+    if (wrote) pass('writeRunFailureRow still reports the run-summary row it wrote');
+    else fail('writeRunFailureRow returned false');
+
+    if (!existsSync(logPath)) {
+      fail('a failed run wrote no per-source rows');
+    } else {
+      const rows = readFileSync(logPath, 'utf-8').split('\n').filter(Boolean).slice(1);
+      const names = rows.map((r) => r.split('\t')[1]);
+      if (rows.length === 2 && names.includes('Read before the crash') && names.includes('Never reached')) {
+        pass('a failed run writes one row per source, including the ones it never reached');
+      } else {
+        fail(`failed-run rows = ${JSON.stringify(rows)}`);
+      }
+      const runRow = readFileSync(runsPath, 'utf-8').split('\n').filter(Boolean).slice(-1)[0].split('\t');
+      if (rows[0].split('\t')[0] === runRow[0]) {
+        pass('the failed run joins its per-source rows on an identical timestamp');
+      } else {
+        fail(`failed-run timestamps differ: ${rows[0].split('\t')[0]} vs ${runRow[0]}`);
+      }
+      if (runRow[1] === 'failed') pass('the failed run is recorded as failed, not completed');
+      else fail(`failed-run status = ${JSON.stringify(runRow[1])}`);
+    }
+
+    // The snapshot is consumed on first use, so a second signal (fatal catch
+    // after SIGINT) can never double-write either file.
+    const secondRows = existsSync(logPath) ? readFileSync(logPath, 'utf-8').split('\n').filter(Boolean).length : 0;
+    writeRunFailureRow('failed', runsPath);
+    const afterRows = existsSync(logPath) ? readFileSync(logPath, 'utf-8').split('\n').filter(Boolean).length : 0;
+    if (secondRows === afterRows) pass('a second failure signal writes nothing twice');
+    else fail(`second signal added rows: ${secondRows} → ${afterRows}`);
+  } finally {
+    registerRunFailureSnapshot(null);
     rmSync(dir, { recursive: true, force: true });
   }
 }

@@ -2225,21 +2225,50 @@ export const SCAN_RUNS_HEADER = 'timestamp\tstatus\tcompanies\tboards\tfound\tfi
 // signals can never double-write. Best-effort by design: a failure to record
 // the failure must not mask the original error, so everything is swallowed.
 let runFailureSnapshot = null;
+let runFailureSourceWriter = null;
 
-export function registerRunFailureSnapshot(fn) {
+/**
+ * @param {Function} fn - returns the run-summary counters as of now
+ * @param {Function} [writeSources] - optional; called with the row's timestamp
+ *   to write the per-source rows for the same failed run. It owns the path,
+ *   because --source-log is only known inside main().
+ */
+export function registerRunFailureSnapshot(fn, writeSources = null) {
   runFailureSnapshot = typeof fn === 'function' ? fn : null;
+  runFailureSourceWriter = typeof writeSources === 'function' ? writeSources : null;
 }
 
 export function writeRunFailureRow(status = 'failed', filePath = SCAN_RUNS_PATH) {
   const snapshot = runFailureSnapshot;
+  const writeSources = runFailureSourceWriter;
   runFailureSnapshot = null;
+  runFailureSourceWriter = null;
   if (!snapshot) return false;
+  // snapshot() is called INSIDE the try: a throwing snapshot must not mask the
+  // original failure, which is the whole point of the best-effort contract.
+  let timestamp = null;
   try {
-    appendScanRunSummary({ ...snapshot(), status }, filePath);
-    return true;
+    const row = { ...snapshot(), status };
+    appendScanRunSummary(row, filePath);
+    timestamp = row.timestamp;
   } catch {
-    return false;
+    // Best-effort by design — see above.
   }
+  if (timestamp === null) return false;
+  // The per-source rows for the same failed run, under the SAME timestamp, so
+  // the join the log promises holds when the run died as well as when it
+  // finished. This is the run where the breakdown matters most: it says which
+  // sources had been read before the failure and which never got their turn.
+  // Skipped when the row above was not written, rather than promising a join
+  // to a run-summary row that does not exist.
+  if (writeSources) {
+    try {
+      writeSources(timestamp);
+    } catch {
+      // Recording the failure must never mask the original error.
+    }
+  }
+  return true;
 }
 
 export function appendScanRunSummary(c, filePath = SCAN_RUNS_PATH) {
@@ -2307,6 +2336,9 @@ export const SOURCE_DROP_REASONS = [
   { key: 'visa', label: 'visa' },
   { key: 'duplicate', label: 'duplicate' },
   { key: 'cooldown', label: 'cooldown' },
+  // Not a sweep filter — --verify runs after the sweep and drops postings
+  // whose page is gone, has no Apply control, or failed the URL guard.
+  { key: 'expired', label: 'expired' },
 ];
 
 const SOURCE_DROP_KEYS = new Set(SOURCE_DROP_REASONS.map((r) => r.key));
@@ -2359,6 +2391,16 @@ export function createSourceLedger() {
     keep(name) {
       get(name).kept += 1;
     },
+    /**
+     * Take back a keep. --verify runs after the sweep, so a posting is
+     * counted as kept and then removed; without this, per-source kept would
+     * stay at the pre-verify count and disagree with what reached the
+     * pipeline. Always paired with a drop, so the row still balances.
+     */
+    unkeep(name) {
+      const record = get(name);
+      if (record.kept > 0) record.kept -= 1;
+    },
     drop(name, reasonKey) {
       if (!SOURCE_DROP_KEYS.has(reasonKey)) {
         throw new Error(`source ledger: unknown drop reason "${reasonKey}"`);
@@ -2373,6 +2415,17 @@ export function createSourceLedger() {
       // Collapsed to one line: a child process's stderr arrives inside the
       // message, and a newline mid-detail breaks the column the eye reads down.
       record.detail = String(message || 'unknown error').replace(/\s+/g, ' ').trim();
+    },
+    /**
+     * The source returned postings, but not the way it should have — today
+     * that means a local parser failed and the API fallback carried the fetch.
+     * Its counts are real, so the line keeps them; a plain 'ok' would hide a
+     * broken parser behind a working one.
+     */
+    degraded(name, message) {
+      const record = get(name);
+      record.status = 'degraded';
+      record.detail = String(message || 'degraded').replace(/\s+/g, ' ').trim();
     },
     skipped(name, message) {
       const record = get(name);
@@ -2434,13 +2487,18 @@ export function formatSourceLine(record) {
     .join(', ');
   const detail = reasons ? `(${reasons})` : (record.found === 0 ? '(no postings returned)' : '');
   const dropped = record.dropped > 0 ? `dropped ${record.dropped}` : '—';
+  // A degraded source keeps its counts — they are real — and says what is
+  // wrong after them, so a broken local parser cannot hide behind the API
+  // fallback that rescued it.
+  const degraded = record.status === 'degraded' ? `  DEGRADED: ${record.detail}` : '';
   return (
     name
     + `found ${record.found}`.padEnd(11)
     + `kept ${record.kept}`.padEnd(10)
     + dropped.padEnd(12)
-    + detail.padEnd(paid ? 30 : 0)
+    + detail.padEnd(paid || degraded ? 30 : 0)
     + paid
+    + degraded
   ).trimEnd();
 }
 
@@ -2865,6 +2923,9 @@ async function main() {
   // that a source no provider matched, and one whose config is broken, each get
   // a line of their own. Silence is never the same as absence.
   const sourceLedger = createSourceLedger();
+  // Offer URL → the source that produced it, so --verify's drops can be
+  // attributed after the sweep's own scope is gone.
+  const sourceByOfferUrl = new Map();
   let skippedCount = 0;
   let boardCount = 0;
   const resolveErrors = [];
@@ -2996,7 +3057,7 @@ async function main() {
       errors: errors.length, filteredBlacklist: totalFilteredBlacklist,
       filteredVisa: totalFilteredVisa, filteredPostedDate: totalFilteredPostedDate,
       filteredCountryEligibility: totalFilteredCountryEligibility,
-    }));
+    }), (timestamp) => appendScanSources(sourceLedger.records(), timestamp, sourceLogPath));
     // Ctrl-C mid-sweep is the common abort. Best effort: record, then die
     // with the conventional SIGINT code.
     process.once('SIGINT', () => {
@@ -3038,6 +3099,11 @@ async function main() {
           company: company.name,
           error: `local parser failed, used API fallback: ${parserErr.message}`,
         });
+        // The fetch succeeded, so the counts below are real and the line must
+        // not read as a clean run: the local parser is broken and only the API
+        // fallback is keeping this source alive. Recorded as a degraded status,
+        // not an error, because the postings did arrive.
+        sourceLedger.degraded(company.name, `local parser failed, used ${provider.id} API fallback: ${parserErr.message}`);
       }
       if (!Array.isArray(jobs)) {
         throw new Error(`${provider.id}: fetch() did not return an array`);
@@ -3153,6 +3219,10 @@ async function main() {
         // as broad-discovery — ineligible for the fallback, per the issue scope.
         const careersUrlDomain = extractCareersUrlDomain(company.careers_url);
         sourceLedger.keep(company.name);
+        // --verify drops postings after the sweep has finished, by which
+        // time the entry that produced them is out of scope. The URL is what
+        // survives into every verify bucket, so it is the key back.
+        sourceByOfferUrl.set(job.url, company.name);
         newOffers.push({
           ...job,
           source: sourceName,
@@ -3176,33 +3246,6 @@ async function main() {
 
   await parallelFetch(tasks, CONCURRENCY);
 
-  // The per-source totals must sum to the run totals. Checked on every real
-  // run, not only in the suite: a drop reason added to the counters above and
-  // forgotten in the ledger is exactly the silent divergence this catches.
-  const ledgerMismatches = reconcileSourceLedger(sourceLedger, {
-    found: totalFound,
-    kept: newOffers.length,
-    blacklist: totalFilteredBlacklist,
-    title: totalFilteredTitle,
-    tier: totalFilteredTier,
-    location: totalFilteredLocation,
-    age: totalFilteredPostingAge,
-    postedDate: totalFilteredPostedDate,
-    salary: totalFilteredSalary,
-    content: totalFilteredContent,
-    countryEligibility: totalFilteredCountryEligibility,
-    visa: totalFilteredVisa,
-    duplicate: totalDupes,
-    cooldown: totalFilteredCooldown,
-  });
-  if (ledgerMismatches.length > 0) {
-    console.error(
-      `\n⚠️  Per-source counts do not sum to the run totals: `
-      + `${ledgerMismatches.map((m) => `${m.field} ${m.ledger} vs ${m.run}`).join(', ')}. `
-      + `The run summary is correct; the per-source breakdown below is short by that much.`,
-    );
-  }
-
   // 5.5. Optional liveness verification — drop expired and guard-rejected postings
   let verifiedOffers = newOffers;
   let expiredOffers = [];
@@ -3221,6 +3264,49 @@ async function main() {
     if (migratedOffers.length > 0) {
       verifiedOffers = [...verifiedOffers, ...migratedOffers];
     }
+  }
+
+  // 5.6. Attribute the verify pass's drops. Until here a source's `kept` is the
+  // pre-verify count, and the postings verify removed belong to no source and no
+  // reason — so the breakdown would claim postings reached the pipeline that
+  // never did. Expired, no-apply-control and guard-rejected are one reason here:
+  // all three mean the posting did not survive verification, and the run summary
+  // already reports the three separately.
+  for (const offer of [...expiredOffers, ...droppedOffers, ...invalidOffers]) {
+    const source = sourceByOfferUrl.get(offer.url);
+    if (!source) continue;
+    sourceLedger.unkeep(source);
+    sourceLedger.drop(source, 'expired');
+  }
+
+  // The per-source totals must sum to the run totals. Checked on every real
+  // run, not only in the suite: a drop reason added to the counters above and
+  // forgotten in the ledger is exactly the silent divergence this catches.
+  // Runs after the verify attribution above, so `kept` is what actually
+  // reached the pipeline rather than what the sweep proposed.
+  const ledgerMismatches = reconcileSourceLedger(sourceLedger, {
+    found: totalFound,
+    kept: verifiedOffers.length,
+    blacklist: totalFilteredBlacklist,
+    title: totalFilteredTitle,
+    tier: totalFilteredTier,
+    location: totalFilteredLocation,
+    age: totalFilteredPostingAge,
+    postedDate: totalFilteredPostedDate,
+    salary: totalFilteredSalary,
+    content: totalFilteredContent,
+    countryEligibility: totalFilteredCountryEligibility,
+    visa: totalFilteredVisa,
+    duplicate: totalDupes,
+    cooldown: totalFilteredCooldown,
+    expired: expiredOffers.length + droppedOffers.length + invalidOffers.length,
+  });
+  if (ledgerMismatches.length > 0) {
+    console.error(
+      `\n⚠️  Per-source counts do not sum to the run totals: `
+      + `${ledgerMismatches.map((m) => `${m.field} ${m.ledger} vs ${m.run}`).join(', ')}. `
+      + `The run summary is correct; the per-source breakdown below is short by that much.`,
+    );
   }
 
   // 5.7. Cross-listing check (#1597): fingerprint each new offer's JD body and

@@ -220,12 +220,13 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
     }
   }
 
-  // search_queries was type-checked here and read by nothing: no module ever
-  // executed a query, so the key made the file overstate its own coverage. It
-  // is reported rather than silently accepted, because a copy restored from a
-  // backup would otherwise re-introduce sources that are never scanned.
+  // search_queries is read by the agent-driven scan step documented in
+  // modes/scan.md, never by scan.mjs. This configuration does not use that
+  // step, so the key described coverage the scanner never delivered. Reported
+  // rather than silently accepted, because a copy restored from a backup would
+  // otherwise re-introduce sources nothing here reads.
   if (config.search_queries !== undefined) {
-    add(warnings, 'search_queries', 'search_queries is no longer read by anything — remove it; the dedicated readers cover the applicant systems and company discovery runs separately');
+    add(warnings, 'search_queries', 'search_queries was removed from this configuration: the scanner never reads it, and the agent-driven web-search step that does (modes/scan.md) is not used here');
   }
 
   // tracked_companies and job_boards share one entry schema (name / careers_url /
