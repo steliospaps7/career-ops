@@ -220,8 +220,13 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
     }
   }
 
-  if (config.search_queries !== undefined && !Array.isArray(config.search_queries)) {
-    add(errors, 'search_queries', 'search_queries must be an array when set');
+  // search_queries is read by the agent-driven scan step documented in
+  // modes/scan.md, never by scan.mjs. This configuration does not use that
+  // step, so the key described coverage the scanner never delivered. Reported
+  // rather than silently accepted, because a copy restored from a backup would
+  // otherwise re-introduce sources nothing here reads.
+  if (config.search_queries !== undefined) {
+    add(warnings, 'search_queries', 'search_queries was removed from this configuration: the scanner never reads it, and the agent-driven web-search step that does (modes/scan.md) is not used here');
   }
 
   // tracked_companies and job_boards share one entry schema (name / careers_url /

@@ -128,7 +128,7 @@ export function ExplorerView({
           <p className="mt-3 max-w-2xl text-[15px] leading-relaxed text-muted">
             {isAi
               ? "Describe the role in plain language — an AI hunts the open web for it, on your own AI. Candidates are unverified until you evaluate."
-              : "Scan the public ATS network — Greenhouse, Lever, Ashby, Workday. Fresh postings matched to you, zero tokens. You only spend when you choose to evaluate one."}
+              : "Scan the public ATS network — Greenhouse, Lever, Ashby, Workday. Fresh postings matched to you, zero tokens. You only spend when you choose to evaluate one. This is an extra covering those four applicant systems, not the full scan: for every board, portfolio and paid reader, run “Scan now.command”."}
           </p>
         )}
       </header>
