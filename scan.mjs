@@ -54,6 +54,7 @@ import {
   writeFileSync,
 } from 'fs';
 import { randomUUID } from 'crypto';
+import { execFile } from 'child_process';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import * as yaml from 'js-yaml';
@@ -68,6 +69,13 @@ import { resolveColumns, parseTrackerRow, normalizeTextKey } from './tracker-par
 import { normalizeCompany } from './tracker-utils.mjs';
 import { normalizeCompanyName } from './invite-match.mjs';
 import { withPipelineLock } from './pipeline-lock.mjs';
+import {
+  readAdvert,
+  saveAdvert,
+  findAdvert,
+  loadAdvertText,
+  defaultTransports,
+} from './providers/_advert-reader.mjs';
 import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter } from './title-keywords.mjs';
 import { flagValue, hasFlag, validateFlags } from './lib/cli-flags.mjs';
 import { withPortalHealthLock } from './portal-health-lock.mjs';
@@ -106,6 +114,10 @@ const PROFILE_PATH = process.env.CAREER_OPS_PROFILE || path.join(DATA_ROOT, 'con
 // anchored one (#3510). One resolution, imported, cannot drift.
 export const SCAN_HISTORY_PATH = process.env.CAREER_OPS_SCAN_HISTORY || path.join(DATA_ROOT, 'data/scan-history.tsv');
 export const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE || path.join(DATA_ROOT, 'data/pipeline.md');
+// Where the read adverts are stored (ticket B1). Anchored like every other data
+// path; the apify plugin writes the same filename shape into the same folder,
+// so jd-capture.mjs resolves either writer's file.
+export const JDS_DIR = path.join(DATA_ROOT, 'jds');
 const APPLICATIONS_PATH = path.join(DATA_ROOT, 'data/applications.md');
 const PROVIDERS_DIR = path.resolve(CODE_ROOT, 'providers');
 
@@ -1935,6 +1947,14 @@ export function formatPipelineOffer(offer) {
   // posted:, before note:, for a stable serialization.
   const trust = formatTrustSegment(offer);
   if (trust) line = `${line} | ${trust}`;
+  // Labeled stored-advert segment (ticket B1) — the URL column stays the
+  // posting URL, because dedup (loadSeenUrls) and the liveness gates match
+  // `https?://` only, and the apify plugin's habit of swapping that column for
+  // a local path is exactly what breaks them. The store reference rides here
+  // instead, like posted: and trust:, and modes/_custom.md teaches pipeline and
+  // triage to read it. An offer with no stored advert produces no segment.
+  const jd = typeof offer.jdPath === 'string' ? offer.jdPath.trim() : '';
+  if (jd) line = `${line} | jd: ${sanitizeMarkdownField(`local:${jd}`)}`;
   // Optional free-text ranking signal (e.g. a curated-list flag an importer
   // attaches). Labeled — not positional like location/compensation — so it can
   // ride on any row shape (bare URL, 3-, 4-, or 5-column) without a reader
@@ -1942,6 +1962,31 @@ export function formatPipelineOffer(offer) {
   // source-specific, and an offer without `note` produces byte-identical output.
   const note = typeof offer.note === 'string' ? sanitizeMarkdownField(offer.note) : '';
   return note ? `${line} | note: ${note}` : line;
+}
+
+// The stored-advert segment on an existing queue line, e.g.
+// `| jd: local:jds/acme-analyst-0123456789.md`. Read and written by the
+// standalone pass, which rewrites lines the scan wrote on an earlier day.
+const JD_SEGMENT_RE = /\|\s*jd:\s*local:(\S+)/;
+
+/** The stored advert a queue line points at, or null. */
+export function extractJdSegment(line) {
+  const m = String(line).match(JD_SEGMENT_RE);
+  return m ? m[1] : null;
+}
+
+/**
+ * Add the segment to a queue line, before `note:` when there is one so the
+ * serialization matches what formatPipelineOffer writes. A line that already
+ * carries one is returned unchanged: the store is the record, and re-reading a
+ * posting the run already read is exactly what the idempotent store prevents.
+ */
+export function insertJdSegment(line, relPath) {
+  if (!relPath || extractJdSegment(line)) return line;
+  const segment = `| jd: ${sanitizeMarkdownField(`local:${relPath}`)}`;
+  const noteAt = line.indexOf('| note:');
+  if (noteAt === -1) return `${line.replace(/\s+$/, '')} ${segment}`;
+  return `${line.slice(0, noteAt)}${segment} ${line.slice(noteAt)}`;
 }
 
 // postedAt arrives as epoch ms (or absent). Convert to 'YYYY-MM-DD', or '' when missing.
@@ -2113,6 +2158,216 @@ export async function appendToPipeline(offers, { pipelinePath = PIPELINE_PATH } 
 
     atomicWriteFile(pipelinePath, text);
   });
+}
+
+// ── The advert reader (ticket B1) ───────────────────────────────────
+//
+// The scan decides on the title alone when the board hands over no advert, and
+// a content filter reading an empty string passes everything, silently. This
+// fills job.description from a stored read before the three advert filters run,
+// and records how the text was got so "could not read" is never mistaken for
+// "no criterion found".
+
+/** Whether a board already handed over an advert worth filtering on. */
+function hasAdvertText(description) {
+  return typeof description === 'string' && description.trim().length > 0;
+}
+
+/** Rung 3: the headless reader already in the tree, read-only, one row at a time. */
+function browserExtractTransport(url, { timeoutMs = 45_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      process.execPath,
+      [path.join(CODE_ROOT, 'browser-extract.mjs'), url, '--mode', 'jd'],
+      { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) return reject(new Error((stderr || err.message).slice(0, 200)));
+        let parsed;
+        try {
+          parsed = JSON.parse(stdout);
+        } catch {
+          return reject(new Error('browser-extract returned unparseable output'));
+        }
+        resolve({ status: 200, text: parsed.text || '', finalUrl: parsed.url || url });
+      },
+    );
+  });
+}
+
+/**
+ * One reader for the sweep and for the standalone pass, so both count the same
+ * things the same way.
+ *
+ * A stored advert is re-used and never re-fetched for the same URL, so a re-run
+ * costs nothing on the boards.
+ */
+export function buildAdvertReader({
+  config = {},
+  jdsDir = JDS_DIR,
+  reread = false,
+  transports = null,
+} = {}) {
+  const firecrawlEnabled = config?.read_ladder?.firecrawl?.enabled === true;
+  const t = transports || defaultTransports({ browser: browserExtractTransport });
+  const tally = {
+    considered: 0,
+    read: 0,
+    reused: 0,
+    rungs: { page: 0, feed: 0, 'apply-link': 0, browser: 0, stored: 0 },
+    unreadable: 0,
+    byFailure: { blocked: 0, shell: 0, expired: 0, other: 0 },
+    firecrawlResidue: 0,
+    unreadableRows: [],
+  };
+
+  async function read({ url, company, title, location }) {
+    tally.considered++;
+    const identity = { url, company: company || '', title: title || '', location: location || '' };
+
+    const existing = findAdvert(identity, { jdsDir });
+    if (existing && !(reread && existing.status !== 'read')) {
+      tally.reused++;
+      const text = existing.status === 'read' ? loadAdvertText(existing.path, { jdsDir }) : '';
+      if (existing.status === 'read') {
+        tally.read++;
+        const rung = existing.rung && tally.rungs[existing.rung] != null ? existing.rung : 'stored';
+        tally.rungs[rung]++;
+      } else {
+        tally.unreadable++;
+        tally.byFailure[existing.status === 'expired' ? 'expired' : 'other']++;
+        tally.unreadableRows.push({ ...identity, failedAs: existing.status, failedAt: 'stored' });
+      }
+      return { status: existing.status, rung: existing.rung, jdPath: existing.path, text, reused: true, reachedFirecrawl: false };
+    }
+
+    const outcome = await readAdvert(url, t, { firecrawlEnabled });
+    const saved = saveAdvert({
+      ...identity,
+      text: outcome.text,
+      rung: outcome.rung,
+      status: outcome.status,
+      finalUrl: outcome.finalUrl,
+      fetchedAt: new Date().toISOString(),
+      source: 'scan-reader',
+    }, { jdsDir, reread });
+
+    if (outcome.reachedFirecrawl) tally.firecrawlResidue++;
+    if (outcome.status === 'read') {
+      tally.read++;
+      if (tally.rungs[outcome.rung] != null) tally.rungs[outcome.rung]++;
+    } else {
+      tally.unreadable++;
+      const kind = outcome.status === 'expired' ? 'expired' : (outcome.failedAs || 'other');
+      tally.byFailure[kind] = (tally.byFailure[kind] || 0) + 1;
+      tally.unreadableRows.push({ ...identity, failedAs: kind, failedAt: outcome.failedAt || 'route' });
+    }
+
+    return { ...outcome, jdPath: saved.path, reused: false };
+  }
+
+  return { read, tally, firecrawlEnabled };
+}
+
+/**
+ * One line per row nobody could read, so Stelios knows which adverts to open by
+ * hand that morning. A row whose stored file already said `unreadable` says so,
+ * rather than repeating the word twice.
+ */
+export function formatUnreadableRow(row) {
+  const how = row.failedAt === 'stored'
+    ? `read as ${row.failedAs} on an earlier run, not re-read`
+    : `${row.failedAs} at ${row.failedAt}`;
+  return `READ | ${row.company || '?'} | ${row.title || '?'} | unreadable: ${how} | ${row.url}`;
+}
+
+/**
+ * The three lines the run prints about the read. B2 adds the drop and route
+ * lines below them; the shape here is the one Stelios reads.
+ */
+export function formatReadSummary(tally, { firecrawlEnabled = false } = {}) {
+  const rungs = ['page', 'feed', 'apply-link', 'browser', 'stored']
+    .filter((k) => tally.rungs[k] > 0)
+    .map((k) => `${k === 'apply-link' ? 'apply link' : k} ${tally.rungs[k]}`)
+    .join(', ');
+  const failures = ['blocked', 'shell', 'expired', 'other']
+    .filter((k) => tally.byFailure[k] > 0)
+    .map((k) => `${k} ${tally.byFailure[k]}`)
+    .join(', ');
+  const lines = [
+    `Adverts read:          ${tally.read} of ${tally.considered}${rungs ? `   (${rungs})` : ''}`,
+    `Unreadable:            ${tally.unreadable}${failures ? `         (${failures})` : ''}`
+      + (tally.unreadable > 0 ? '   listed below for a manual read' : ''),
+    `Firecrawl:             ${firecrawlEnabled ? 'ON (not built)' : 'OFF'}        `
+      + `${tally.firecrawlResidue} row(s) would have reached it today`,
+  ];
+  return lines;
+}
+
+/**
+ * The standalone pass: `node scan.mjs --read-pipeline`.
+ *
+ * Walks the Pending section, reads every entry that carries no `jd:` segment
+ * yet, and rewrites the line with one. It takes the same lock appendToPipeline
+ * takes and reads no boards, so it is how the roles already queued get the same
+ * treatment as tomorrow's scan.
+ *
+ * B1 rewrites lines and nothing else. Moving a drop to Processed with its
+ * reason arrives with `--gate` in B2.
+ *
+ * `readEntry` is injected so the whole pass is testable against a temporary
+ * file with no network and no store.
+ *
+ * @param {{pipelinePath?: string, readEntry: Function}} options
+ * @returns {Promise<{read:number, unreadable:number, expired:number, skipped:number, firecrawlResidue:number, unreadableRows:Array<object>}>}
+ */
+export async function readPipelineAdverts({ pipelinePath = PIPELINE_PATH, readEntry } = {}) {
+  const counts = { read: 0, unreadable: 0, expired: 0, skipped: 0, firecrawlResidue: 0, unreadableRows: [] };
+  if (typeof readEntry !== 'function') throw new Error('readPipelineAdverts: readEntry is required');
+  if (!existsSync(pipelinePath)) return counts;
+
+  await withPipelineLock(pipelinePath, async () => {
+    const lines = readFileSync(pipelinePath, 'utf-8').split('\n');
+    const startIdx = lines.findIndex(l => PENDING_MARKERS.some(m => l.trim() === m));
+    if (startIdx === -1) return;
+    let endIdx = lines.length;
+    for (let i = startIdx + 1; i < lines.length; i++) {
+      if (lines[i].startsWith('## ')) { endIdx = i; break; }
+    }
+
+    for (let i = startIdx + 1; i < endIdx; i++) {
+      const line = lines[i];
+      const entry = pipelineEntry(line, PIPELINE_CHECKBOX_RE);
+      // A struck-out entry is the pipeline's record of a dead posting; there is
+      // nothing left to read.
+      if (!entry || entry.expired) continue;
+      if (extractJdSegment(line)) { counts.skipped++; continue; }
+      const url = extractPipelineUrl(line);
+      if (!url) continue;
+      const pair = extractPipelineCompanyRole(line) || { company: '', role: '' };
+
+      let outcome = null;
+      try {
+        outcome = await readEntry({ url, company: pair.company, title: pair.role, line });
+      } catch (err) {
+        // Per row, never per run.
+        outcome = { status: 'unreadable', rung: null, jdPath: null, failedAs: 'blocked', failedAt: 'reader', reachedFirecrawl: true, error: err?.message };
+      }
+      if (!outcome) continue;
+
+      if (outcome.jdPath) lines[i] = insertJdSegment(line, outcome.jdPath);
+      if (outcome.reachedFirecrawl) counts.firecrawlResidue++;
+      if (outcome.status === 'read') counts.read++;
+      else if (outcome.status === 'expired') counts.expired++;
+      else {
+        counts.unreadable++;
+        counts.unreadableRows.push({ url, company: pair.company, title: pair.role, failedAs: outcome.failedAs, failedAt: outcome.failedAt });
+      }
+    }
+
+    atomicWriteFile(pipelinePath, lines.join('\n'));
+  });
+
+  return counts;
 }
 
 // data/scan-history.tsv has exactly the same set of concurrent writers as
@@ -2749,6 +3004,7 @@ const KNOWN_FLAGS = [
   '--dry-run', '--verify', '--headed-fallback', '--throttle', '--rediscover-404',
   '--include-blacklisted', '--company', '--posted-after', '--posted-before',
   '--since', '--quiet', '--json', '--help', '-h', '--source-log',
+  '--read-pipeline', '--reread',
 ];
 
 // Flags whose space-separated value is the NEXT argv token (the `--flag=value`
@@ -2771,6 +3027,8 @@ const USAGE = `Usage:
   node scan.mjs --posted-after 2026-07-01    # absolute lower bound on posting date
   node scan.mjs --posted-before 2026-08-01   # absolute upper bound on posting date
   node scan.mjs --source-log <path>          # write the per-source rows here instead of data/scan-sources.tsv
+  node scan.mjs --read-pipeline              # read the adverts of the rows already queued, and label them
+  node scan.mjs --reread                     # re-read a stored advert that was not read the first time
   node scan.mjs --json                       # emit one machine-readable receipt on stdout
   node scan.mjs --quiet                      # suppress the manifesto footer
   node scan.mjs --help                       # print this usage block and exit`;
@@ -2888,6 +3146,32 @@ async function main() {
     process.exit(1);
   }
   const config = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
+
+  // --read-pipeline: read and label the rows already in the queue, and stop.
+  // No board is touched. This is how the roles queued before the reader existed
+  // get the same treatment as tomorrow's scan. Running it over the real queue is
+  // Stelios's button, from a terminal.
+  if (args.includes('--read-pipeline')) {
+    const reader = buildAdvertReader({ config, reread: args.includes('--reread') });
+    console.log(`Reading the adverts of the rows already queued in ${PIPELINE_PATH} …`);
+    const counts = await readPipelineAdverts({
+      readEntry: async (entry) => {
+        const outcome = await reader.read(entry);
+        console.log(`  ${outcome.status === 'read' ? '✅' : '⚠️ '} ${outcome.status.padEnd(11)} ${entry.company || '?'} | ${entry.title || '?'}`);
+        return outcome;
+      },
+    });
+    console.log('');
+    for (const line of formatReadSummary(reader.tally, { firecrawlEnabled: reader.firecrawlEnabled })) {
+      console.log(line);
+    }
+    console.log(`Already labelled:      ${counts.skipped} row(s) skipped`);
+    for (const row of reader.tally.unreadableRows) {
+      console.log(formatUnreadableRow(row));
+    }
+    return;
+  }
+
   const companies = Array.isArray(config.tracked_companies) ? config.tracked_companies : [];
   const boards = Array.isArray(config.job_boards) ? config.job_boards : [];
   const titleFilter = buildTitleFilter(config.title_filter);
@@ -2915,6 +3199,9 @@ async function main() {
   const candidateCountry = loadCandidateCountry();
   const countryEligibilityFilter = buildCountryEligibilityFilter(config.country_eligibility_filter, candidateCountry);
   const visaFilter = buildVisaFilter(config.visa_filter);
+  // Ticket B1: the reader that fills job.description before the three filters
+  // above can read it. Built here so one tally serves the whole run.
+  const advertReader = buildAdvertReader({ config, reread: args.includes('--reread') });
   const visaEnabled = Boolean(config.visa_filter) && config.visa_filter.enabled !== false;
 
   // 3. Resolve a provider for each enabled company / board
@@ -3174,6 +3461,23 @@ async function main() {
           sourceLedger.drop(company.name, 'salary');
           continue;
         }
+        // ── Read the advert (ticket B1) ──────────────────────────
+        // The free title, tier, location, age and salary filters have cut
+        // first, so the reader touches only rows that would otherwise reach the
+        // queue. It fills job.description and the three filters below run
+        // unchanged. A row it cannot read is kept, labelled and listed — never
+        // dropped on an advert nobody read, and never passed on an empty one.
+        if (!hasAdvertText(job.description)) {
+          const outcome = await advertReader.read({
+            url: job.url,
+            company: job.company || company.name || '',
+            title: job.title,
+            location: job.location,
+          });
+          if (outcome.jdPath) job.jdPath = outcome.jdPath;
+          job.readStatus = outcome.status;
+          if (outcome.status === 'read' && outcome.text) job.description = outcome.text;
+        }
         if (!contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
           totalFilteredContent++;
           sourceLedger.drop(company.name, 'content');
@@ -3411,6 +3715,17 @@ async function main() {
     console.log(`Filtered by cooldown:  ${totalFilteredCooldown} removed`);
   }
   console.log(`Duplicates:            ${totalDupes} skipped`);
+  // The read (ticket B1). Printed whenever the reader was asked for anything,
+  // so a run where every board handed over an advert stays byte-identical.
+  if (advertReader.tally.considered > 0) {
+    console.log('');
+    for (const line of formatReadSummary(advertReader.tally, { firecrawlEnabled: advertReader.firecrawlEnabled })) {
+      console.log(line);
+    }
+    for (const row of advertReader.tally.unreadableRows) {
+      console.log(formatUnreadableRow(row));
+    }
+  }
   if (blacklist.size > 0) {
     if (includeBlacklisted) {
       console.log(`Blacklisted:           ${annotatedBlacklisted} let through annotated (--include-blacklisted)`);

@@ -34,10 +34,16 @@ function stripMarkup(content) {
  *
  * Exported for tests.
  *
+ * `cap` defaults to DESCRIPTION_CAP, which is right for a scan payload. The
+ * advert reader passes its own, larger one: a years clause or a visa line often
+ * sits past 4 KB, and a filter that never sees it passes the posting silently —
+ * the exact failure the reader exists to close.
+ *
  * @param {unknown} content
+ * @param {number} [cap]
  * @returns {string}
  */
-export function htmlToText(content) {
+export function htmlToText(content, cap = DESCRIPTION_CAP) {
   if (typeof content !== 'string' || !content) return '';
   // Strip literal markup before decoding: quote entities inside a quoted
   // attribute are data, and decoding them first would turn them into false
@@ -51,5 +57,5 @@ export function htmlToText(content) {
     .replace(/<(?=\/?[a-z!?])/gi, '')
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, DESCRIPTION_CAP);
+    .slice(0, cap);
 }
