@@ -144,7 +144,10 @@ function tempDir() {
 
   const line42 = lines.find(l => l.includes('/roles/42'));
   ok('the read line gained its jd: segment', line42.includes('| jd: local:jds/example-ltd-programme-manager-4242424242.md'));
-  ok('and kept its URL', line42.includes('https://careers.example.com/roles/42'));
+  // Assert the URL *cell*, not a substring of the line: a substring test would
+  // also pass on a line whose URL column had been replaced and the real URL
+  // pushed into a note, which is the failure this segment exists to prevent.
+  eq('and kept its URL', line42.split('|')[0].trim(), '- [ ] https://careers.example.com/roles/42');
 
   const line43 = lines.find(l => l.includes('/roles/43'));
   eq('the line that already had one is byte-identical', line43, '- [ ] https://careers.example.com/roles/43 | Example Ltd | Delivery Lead | jd: local:jds/already-1111111111.md');
