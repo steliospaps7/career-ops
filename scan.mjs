@@ -74,6 +74,7 @@ import {
   saveAdvert,
   findAdvert,
   loadAdvertText,
+  advertStatusAt,
   defaultTransports,
 } from './providers/_advert-reader.mjs';
 import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter } from './title-keywords.mjs';
@@ -2173,8 +2174,44 @@ function hasAdvertText(description) {
   return typeof description === 'string' && description.trim().length > 0;
 }
 
-/** Rung 3: the headless reader already in the tree, read-only, one row at a time. */
-function browserExtractTransport(url, { timeoutMs = 45_000 } = {}) {
+/**
+ * Whether a read outcome takes the row out of the run.
+ *
+ * Only `expired` does. The board's own page says the posting is gone, so there
+ * is nothing to filter and nothing to apply to; passing it on with an empty
+ * description is exactly the silent pass this ticket exists to close. A row
+ * nobody could read is the opposite case and is kept, labelled and listed.
+ *
+ * The row is not written to scan-history: a read verdict of `expired` is one
+ * run's reading of one page, and a wrong one recorded there would dedup-filter a
+ * live posting out of every later scan. Dropping it from this run is the
+ * reversible direction.
+ */
+export function advertReadDropsRow(status) {
+  return status === 'expired';
+}
+
+/**
+ * Rung 3: the headless reader already in the tree, read-only.
+ *
+ * Serialized across the whole run by the promise chain below, not merely called
+ * once per row. The sweep fetches sources through CONCURRENCY workers, so
+ * without this every worker that reached rung 3 launched its own Chromium at the
+ * same moment: on 10 September three Welcome to the Jungle rows timed out in the
+ * sweep and read cleanly in the sequential standalone pass over the same URLs.
+ */
+let browserQueue = Promise.resolve();
+
+function browserExtractTransport(url, opts = {}) {
+  const settled = () => undefined;
+  const run = browserQueue.then(() => spawnBrowserExtract(url, opts), () => spawnBrowserExtract(url, opts));
+  // The queue tracks completion, never failure: one row's timeout must not
+  // reject the next row's turn.
+  browserQueue = run.then(settled, settled);
+  return run;
+}
+
+function spawnBrowserExtract(url, { timeoutMs = 45_000 } = {}) {
   return new Promise((resolve, reject) => {
     execFile(
       process.execPath,
@@ -2213,7 +2250,7 @@ export function buildAdvertReader({
     considered: 0,
     read: 0,
     reused: 0,
-    rungs: { page: 0, feed: 0, 'apply-link': 0, browser: 0, stored: 0 },
+    rungs: { page: 0, feed: 0, 'apply-link': 0, browser: 0, stored: 0, apify: 0 },
     unreadable: 0,
     byFailure: { blocked: 0, shell: 0, expired: 0, other: 0 },
     firecrawlResidue: 0,
@@ -2228,16 +2265,26 @@ export function buildAdvertReader({
     if (existing && !(reread && existing.status !== 'read')) {
       tally.reused++;
       const text = existing.status === 'read' ? loadAdvertText(existing.path, { jdsDir }) : '';
+      // A row nobody could read yesterday would walk the same ladder today and
+      // reach the paid rung again, so it counts against the residue exactly as a
+      // fresh failure does. Without this the second run of any day reports a
+      // residue near zero and reads like a fix. An `expired` row is the
+      // exception: its ladder ended at the board's own page.
+      const reachedFirecrawl = existing.status !== 'read' && existing.status !== 'expired';
+      if (reachedFirecrawl) tally.firecrawlResidue++;
       if (existing.status === 'read') {
         tally.read++;
         const rung = existing.rung && tally.rungs[existing.rung] != null ? existing.rung : 'stored';
         tally.rungs[rung]++;
       } else {
         tally.unreadable++;
-        tally.byFailure[existing.status === 'expired' ? 'expired' : 'other']++;
+        // Bucketed under what the file actually says, not swept into `other`:
+        // the breakdown is what tells a bot wall from a posting that is gone.
+        const kind = existing.status || 'other';
+        tally.byFailure[kind] = (tally.byFailure[kind] || 0) + 1;
         tally.unreadableRows.push({ ...identity, failedAs: existing.status, failedAt: 'stored' });
       }
-      return { status: existing.status, rung: existing.rung, jdPath: existing.path, text, reused: true, reachedFirecrawl: false };
+      return { status: existing.status, rung: existing.rung, jdPath: existing.path, text, reused: true, reachedFirecrawl };
     }
 
     const outcome = await readAdvert(url, t, { firecrawlEnabled });
@@ -2284,23 +2331,31 @@ export function formatUnreadableRow(row) {
  * The three lines the run prints about the read. B2 adds the drop and route
  * lines below them; the shape here is the one Stelios reads.
  */
+const FAILURE_ORDER = ['blocked', 'shell', 'expired', 'unreadable', 'other'];
+
 export function formatReadSummary(tally, { firecrawlEnabled = false } = {}) {
-  const rungs = ['page', 'feed', 'apply-link', 'browser', 'stored']
+  const rungs = ['page', 'feed', 'apply-link', 'browser', 'stored', 'apify']
     .filter((k) => tally.rungs[k] > 0)
     .map((k) => `${k === 'apply-link' ? 'apply link' : k} ${tally.rungs[k]}`)
     .join(', ');
-  const failures = ['blocked', 'shell', 'expired', 'other']
-    .filter((k) => tally.byFailure[k] > 0)
+  // Every bucket that has a count, not a fixed list: a stored row is bucketed
+  // under whatever its file says, and a status the list never anticipated would
+  // otherwise be counted in `unreadable` and named nowhere.
+  const seen = Object.keys(tally.byFailure).filter((k) => tally.byFailure[k] > 0);
+  const failures = [
+    ...FAILURE_ORDER.filter((k) => seen.includes(k)),
+    ...seen.filter((k) => !FAILURE_ORDER.includes(k)).sort(),
+  ]
     .map((k) => `${k} ${tally.byFailure[k]}`)
     .join(', ');
-  const lines = [
+  const residue = tally.firecrawlResidue;
+  return [
     `Adverts read:          ${tally.read} of ${tally.considered}${rungs ? `   (${rungs})` : ''}`,
     `Unreadable:            ${tally.unreadable}${failures ? `         (${failures})` : ''}`
       + (tally.unreadable > 0 ? '   listed below for a manual read' : ''),
     `Firecrawl:             ${firecrawlEnabled ? 'ON (not built)' : 'OFF'}        `
-      + `${tally.firecrawlResidue} row(s) would have reached it today`,
+      + `${residue} ${residue === 1 ? 'row' : 'rows'} would have reached it today`,
   ];
-  return lines;
 }
 
 /**
@@ -2320,7 +2375,12 @@ export function formatReadSummary(tally, { firecrawlEnabled = false } = {}) {
  * @param {{pipelinePath?: string, readEntry: Function}} options
  * @returns {Promise<{read:number, unreadable:number, expired:number, skipped:number, firecrawlResidue:number, unreadableRows:Array<object>}>}
  */
-export async function readPipelineAdverts({ pipelinePath = PIPELINE_PATH, readEntry } = {}) {
+export async function readPipelineAdverts({
+  pipelinePath = PIPELINE_PATH,
+  readEntry,
+  reread = false,
+  storedStatus = (relPath) => advertStatusAt(relPath, { jdsDir: JDS_DIR }),
+} = {}) {
   const counts = { read: 0, unreadable: 0, expired: 0, skipped: 0, firecrawlResidue: 0, unreadableRows: [] };
   if (typeof readEntry !== 'function') throw new Error('readPipelineAdverts: readEntry is required');
   if (!existsSync(pipelinePath)) return counts;
@@ -2340,7 +2400,16 @@ export async function readPipelineAdverts({ pipelinePath = PIPELINE_PATH, readEn
       // A struck-out entry is the pipeline's record of a dead posting; there is
       // nothing left to read.
       if (!entry || entry.expired) continue;
-      if (extractJdSegment(line)) { counts.skipped++; continue; }
+      // A line already carrying a jd: has been read. Under --reread, read it
+      // again when the stored advert was never actually read — those lines are
+      // the only ones the flag exists for, so skipping them unconditionally made
+      // it a no-op. A file the apify plugin wrote reads as `read` and is left
+      // alone, so a paid advert is never replaced by a free re-fetch.
+      const storedPath = extractJdSegment(line);
+      if (storedPath && !(reread && storedStatus(storedPath) !== 'read')) {
+        counts.skipped++;
+        continue;
+      }
       const url = extractPipelineUrl(line);
       if (!url) continue;
       const pair = extractPipelineCompanyRole(line) || { company: '', role: '' };
@@ -2586,6 +2655,10 @@ export const SOURCE_DROP_REASONS = [
   { key: 'age', label: 'age' },
   { key: 'postedDate', label: 'posted date' },
   { key: 'salary', label: 'salary' },
+  // The reader runs here, between the free filters and the three that read the
+  // advert. A posting whose own board page says it is gone is dropped rather
+  // than passed on with an empty description.
+  { key: 'advertExpired', label: 'advert expired' },
   { key: 'content', label: 'content' },
   { key: 'countryEligibility', label: 'country' },
   { key: 'visa', label: 'visa' },
@@ -3155,6 +3228,7 @@ async function main() {
     const reader = buildAdvertReader({ config, reread: args.includes('--reread') });
     console.log(`Reading the adverts of the rows already queued in ${PIPELINE_PATH} …`);
     const counts = await readPipelineAdverts({
+      reread: args.includes('--reread'),
       readEntry: async (entry) => {
         const outcome = await reader.read(entry);
         console.log(`  ${outcome.status === 'read' ? '✅' : '⚠️ '} ${outcome.status.padEnd(11)} ${entry.company || '?'} | ${entry.title || '?'}`);
@@ -3165,7 +3239,7 @@ async function main() {
     for (const line of formatReadSummary(reader.tally, { firecrawlEnabled: reader.firecrawlEnabled })) {
       console.log(line);
     }
-    console.log(`Already labelled:      ${counts.skipped} row(s) skipped`);
+    console.log(`Already labelled:      ${counts.skipped} ${counts.skipped === 1 ? 'row' : 'rows'} skipped`);
     for (const row of reader.tally.unreadableRows) {
       console.log(formatUnreadableRow(row));
     }
@@ -3317,6 +3391,7 @@ async function main() {
   let totalFilteredPostingAge = 0;
   let totalFilteredPostedDate = 0;
   let totalFilteredSalary = 0;
+  let totalFilteredAdvertExpired = 0;
   let totalFilteredContent = 0;
   let totalFilteredCountryEligibility = 0;
   let totalFilteredBlacklist = 0;
@@ -3476,6 +3551,11 @@ async function main() {
           });
           if (outcome.jdPath) job.jdPath = outcome.jdPath;
           job.readStatus = outcome.status;
+          if (advertReadDropsRow(outcome.status)) {
+            totalFilteredAdvertExpired++;
+            sourceLedger.drop(company.name, 'advertExpired');
+            continue;
+          }
           if (outcome.status === 'read' && outcome.text) job.description = outcome.text;
         }
         if (!contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
@@ -3598,6 +3678,7 @@ async function main() {
     age: totalFilteredPostingAge,
     postedDate: totalFilteredPostedDate,
     salary: totalFilteredSalary,
+    advertExpired: totalFilteredAdvertExpired,
     content: totalFilteredContent,
     countryEligibility: totalFilteredCountryEligibility,
     visa: totalFilteredVisa,
@@ -3721,6 +3802,9 @@ async function main() {
     console.log('');
     for (const line of formatReadSummary(advertReader.tally, { firecrawlEnabled: advertReader.firecrawlEnabled })) {
       console.log(line);
+    }
+    if (totalFilteredAdvertExpired > 0) {
+      console.log(`Dropped, posting gone: ${totalFilteredAdvertExpired} removed`);
     }
     for (const row of advertReader.tally.unreadableRows) {
       console.log(formatUnreadableRow(row));

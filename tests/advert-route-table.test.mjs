@@ -100,6 +100,44 @@ function eq(label, actual, expected) {
   eq('linkedin: currentJobId is read from the query', r?.jobId, '3901234567');
 }
 
+// ── The EU hosts the ATS resolver already knew about ────────────────
+{
+  const r = resolveReadRoute('https://jobs.eu.lever.co/coalfire/1a2b3c4d-5e6f-7788-99aa-bbccddeeff00');
+  eq('lever EU: host recognised', r?.host, 'lever');
+  eq(
+    'lever EU: the API host follows the board host',
+    r?.url,
+    'https://api.eu.lever.co/v0/postings/coalfire/1a2b3c4d-5e6f-7788-99aa-bbccddeeff00?mode=json',
+  );
+}
+{
+  const r = resolveReadRoute('https://job-boards.eu.greenhouse.io/stripe/jobs/5551234');
+  eq('greenhouse EU: resolves to the same board API', r?.url, 'https://boards-api.greenhouse.io/v1/boards/stripe/jobs/5551234');
+}
+
+// ── The SSRF guard on every value taken out of the URL ──────────────
+// resolveAtsApi's isSafeValue is what stands between a path segment and a URL
+// this reader will fetch. A segment outside its charset resolves to a plain
+// page fetch of the original URL, never to a feed built from it.
+for (const bad of [
+  'https://boards.greenhouse.io/..%2f..%2fadmin/jobs/5551234',
+  'https://jobs.ashbyhq.com/org%20with%20space/8f5b1c2d-1111-2222-3333-444455556666',
+  'https://apply.workable.com/acc$ount/j/A1B2C3D4E5/',
+]) {
+  const r = resolveReadRoute(bad);
+  ok(`an unsafe path segment claims no feed: ${bad}`, r === null || r.kind === 'page');
+  if (r) eq('  and the page route fetches the URL it was given, unchanged', r.url, bad);
+}
+
+// ── Workday is left to the browser rung ─────────────────────────────
+{
+  // browser-extract.mjs already reads Workday through its CXS endpoint, so the
+  // reader claims no feed here rather than growing a sixth one.
+  const r = resolveReadRoute('https://acme.wd3.myworkdayjobs.com/en-US/careers/job/London/Analyst_R123456');
+  eq('workday: no feed claimed', r?.kind, 'page');
+  eq('workday: no host route', r?.host, null);
+}
+
 // ── Unknown host ────────────────────────────────────────────────────
 {
   const r = resolveReadRoute('https://careers.example.com/roles/analyst-42');

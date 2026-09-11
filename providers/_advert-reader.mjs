@@ -20,6 +20,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync } from '
 import { createHash } from 'crypto';
 import { join } from 'path';
 import { classifyLiveness } from '../liveness-core.mjs';
+import { resolveAtsApi, isSafeValue } from '../liveness-api.mjs';
 import { htmlToText } from './_html-to-text.mjs';
 import { providerFetchContext } from './_ip-guard.mjs';
 import { DEFAULT_USER_AGENT } from '../user-agent.mjs';
@@ -43,8 +44,15 @@ const DEFAULT_JDS_DIR = 'jds';
 //
 // Five hosts return a shell to a plain fetch and a full advert to a free JSON
 // (or, for LinkedIn, plain-markup) route. Pure: a URL in, a fetch plan out.
-
-const UUID = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
+//
+// Host detection and the SSRF guard are `liveness-api.mjs`'s, not a second copy:
+// `resolveAtsApi` already knows every host this reader wants, including
+// `jobs.eu.lever.co` and `job-boards.eu.greenhouse.io`, and it runs `isSafeValue`
+// over every value it takes out of the URL before any of them reaches a URL we
+// fetch. A path segment outside that charset yields no feed at all, and the
+// reader falls back to a plain fetch of the posting URL it was given. The
+// endpoints below are still built here, because two of them carry a query the
+// liveness check has no use for.
 
 /**
  * @typedef {object} ReadRoute
@@ -76,66 +84,51 @@ export function resolveReadRoute(rawUrl) {
   // javascript:, data:, file: or plain http URL is never fetched here.
   if (u.protocol !== 'https:') return null;
 
-  const host = u.hostname.toLowerCase().replace(/^www\./, '');
   const pageUrl = rawUrl.trim();
   const page = { kind: /** @type {const} */ ('page'), host: null, url: pageUrl, format: /** @type {const} */ ('html'), pageUrl };
 
-  // Ashby: the free route is the whole board feed, and the posting is picked
-  // out of it by id.
-  if (host === 'jobs.ashbyhq.com') {
-    const m = u.pathname.match(new RegExp(`^/([^/]+)/(${UUID})`));
-    if (m) {
-      return {
-        kind: 'feed', host: 'ashby', format: 'json', org: m[1], jobId: m[2], pageUrl,
-        url: `https://api.ashbyhq.com/posting-api/job-board/${m[1]}?includeCompensation=true`,
-      };
+  const ats = resolveAtsApi(pageUrl);
+  if (ats) {
+    const p = ats.parts;
+    switch (ats.ats) {
+      case 'greenhouse':
+        return {
+          kind: 'feed', host: 'greenhouse', format: 'json', org: p.board, jobId: p.id, pageUrl,
+          url: `https://boards-api.greenhouse.io/v1/boards/${p.board}/jobs/${p.id}`,
+        };
+      case 'lever':
+        // `mode=json` is the documented explicit form, and p.apiHost carries the
+        // EU board's own API host rather than a hard-coded api.lever.co.
+        return {
+          kind: 'feed', host: 'lever', format: 'json', org: p.slug, jobId: p.id, pageUrl,
+          url: `https://${p.apiHost}/v0/postings/${p.slug}/${p.id}?mode=json`,
+        };
+      case 'ashby':
+        // Ashby's free route is the whole board feed; the posting is picked out
+        // of it by id.
+        return {
+          kind: 'feed', host: 'ashby', format: 'json', org: p.org, jobId: p.jobId, pageUrl,
+          url: `https://api.ashbyhq.com/posting-api/job-board/${p.org}?includeCompensation=true`,
+        };
+      case 'linkedin':
+        // The guest endpoint returns markup, not JSON.
+        return { kind: 'feed', host: 'linkedin', format: 'html', jobId: p.id, pageUrl, url: ats.apiUrl };
+      default:
+        // Workday, today. `browser-extract.mjs` already reads a Workday posting
+        // through its CXS endpoint at rung 3, so the reader claims no feed here
+        // rather than growing a sixth one the ticket did not ask for.
+        return page;
     }
-    return page;
   }
 
-  if (host === 'apply.workable.com') {
+  // Workable is the one host resolveAtsApi does not carry, so its two values get
+  // the same isSafeValue check by hand before either reaches a fetched URL.
+  if (u.hostname.toLowerCase().replace(/^www\./, '') === 'apply.workable.com') {
     const m = u.pathname.match(/^\/([^/]+)\/j\/([^/]+)/);
-    if (m) {
+    if (m && isSafeValue(m[1]) && isSafeValue(m[2])) {
       return {
         kind: 'feed', host: 'workable', format: 'json', org: m[1], jobId: m[2], pageUrl,
         url: `https://apply.workable.com/api/v2/accounts/${m[1]}/jobs/${m[2]}`,
-      };
-    }
-    return page;
-  }
-
-  if (host === 'jobs.lever.co') {
-    const m = u.pathname.match(new RegExp(`^/([^/]+)/(${UUID})`));
-    if (m) {
-      return {
-        kind: 'feed', host: 'lever', format: 'json', org: m[1], jobId: m[2], pageUrl,
-        url: `https://api.lever.co/v0/postings/${m[1]}/${m[2]}?mode=json`,
-      };
-    }
-    return page;
-  }
-
-  if (host === 'boards.greenhouse.io' || host === 'job-boards.greenhouse.io') {
-    const m = u.pathname.match(/^\/([^/]+)\/jobs\/(\d+)/);
-    if (m) {
-      return {
-        kind: 'feed', host: 'greenhouse', format: 'json', org: m[1], jobId: m[2], pageUrl,
-        url: `https://boards-api.greenhouse.io/v1/boards/${m[1]}/jobs/${m[2]}`,
-      };
-    }
-    return page;
-  }
-
-  if (host === 'linkedin.com' || host.endsWith('.linkedin.com')) {
-    // The id sits in the path on a permalink and in a query parameter on a
-    // search page. The guest endpoint returns markup, not JSON.
-    const fromPath = u.pathname.match(/\/jobs\/view\/(?:[^/]*?-)?(\d+)/);
-    const fromQuery = u.searchParams.get('currentJobId');
-    const jobId = fromPath ? fromPath[1] : (fromQuery && /^\d+$/.test(fromQuery) ? fromQuery : null);
-    if (jobId) {
-      return {
-        kind: 'feed', host: 'linkedin', format: 'html', jobId, pageUrl,
-        url: `https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/${jobId}`,
       };
     }
     return page;
@@ -512,11 +505,37 @@ export function findAdvert({ company, title, url }, { jdsDir = DEFAULT_JDS_DIR }
   } catch {
     return null;
   }
-  return {
-    path: `${DEFAULT_JDS_DIR}/${filename}`,
-    status: frontmatterField(raw, 'read_status'),
-    rung: frontmatterField(raw, 'read_rung') || null,
-  };
+  return { path: `${DEFAULT_JDS_DIR}/${filename}`, ...storedState(raw) };
+}
+
+/**
+ * The status and rung a stored file records.
+ *
+ * A file with no `read_status` was written by the apify plugin, which does not
+ * write one, and carries the full advert its paid actor returned. It reads as
+ * `read`: treating the absent field as "not read" would let `--reread` delete an
+ * advert somebody paid for and replace it with a free fetch of a page that may
+ * no longer exist.
+ */
+function storedState(raw) {
+  const status = frontmatterField(raw, 'read_status');
+  if (status === null) return { status: 'read', rung: 'apify', foreign: true };
+  return { status, rung: frontmatterField(raw, 'read_rung') || null, foreign: false };
+}
+
+/**
+ * The `read_status` of one stored file, addressed by the path a queue line's
+ * `jd:` segment names. Null when there is no such file.
+ */
+export function advertStatusAt(relPath, { jdsDir = DEFAULT_JDS_DIR } = {}) {
+  const filename = String(relPath).split('/').pop();
+  const filepath = join(jdsDir, filename);
+  if (!existsSync(filepath)) return null;
+  try {
+    return storedState(readFileSync(filepath, 'utf-8')).status;
+  } catch {
+    return null;
+  }
 }
 
 /** The advert body of a stored file, without its frontmatter. '' when unreadable. */
@@ -553,8 +572,10 @@ export function saveAdvert(record, { jdsDir = DEFAULT_JDS_DIR, reread = false } 
   const filepath = join(jdsDir, filename);
   try {
     if (existsSync(filepath)) {
-      const existingStatus = frontmatterField(readFileSync(filepath, 'utf-8'), 'read_status');
-      if (!reread || existingStatus === 'read') return { path: relPath, reused: true };
+      // storedState, not the raw field: a file the apify plugin wrote has no
+      // read_status and is never overwritten by a free re-read.
+      const existing = storedState(readFileSync(filepath, 'utf-8'));
+      if (!reread || existing.status === 'read') return { path: relPath, reused: true };
       unlinkSync(filepath);
     }
     mkdirSync(jdsDir, { recursive: true });
@@ -592,22 +613,64 @@ ${record.text || ''}
 // place. Each returns the status code instead of throwing on it, because
 // classifyLiveness needs the code to tell a bot wall from a dead posting.
 
-async function httpGet(url, { timeoutMs = DEFAULT_TIMEOUT_MS, headers = {} } = {}) {
+/**
+ * How many redirects one read may follow. Enough for an aggregator's apply link
+ * to reach an employer's applicant system through a shortener and a locale
+ * bounce; short enough that a loop ends.
+ */
+export const MAX_REDIRECT_HOPS = 5;
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * One GET, following redirects a hop at a time.
+ *
+ * `providers/ADDING_A_PROVIDER.md` tells a provider to pass `redirect: 'error'`,
+ * because a server-side redirect can point the request at an internal address
+ * and `fetch`'s own following happens where no guard can see it. The reader
+ * cannot refuse redirects outright: the apply-link rung follows a href the page
+ * chose, and an aggregator's apply button is a redirect by design. So it asks
+ * for `redirect: 'manual'` and inspects each destination itself — https only,
+ * at most MAX_REDIRECT_HOPS of them, and every hop inside providerFetchContext,
+ * so the DNS guard validates the address of each one rather than only the first.
+ *
+ * @returns {Promise<{status:number, body:string, finalUrl:string}>}
+ */
+export async function httpGet(url, { timeoutMs = DEFAULT_TIMEOUT_MS, headers = {} } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    // The same scoped guard every provider fetch runs inside: _dns-cache.mjs
-    // patches dns.lookup process-wide, and this marks the request as provider
-    // traffic so the resolved addresses are validated.
-    return await providerFetchContext.run({ url: String(url) }, async () => {
-      const res = await fetch(url, {
-        headers: { 'user-agent': DEFAULT_USER_AGENT, accept: '*/*', ...headers },
-        redirect: 'follow',
-        signal: controller.signal,
+    let current = String(url);
+    let last = { status: 0, body: '', finalUrl: current };
+    for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+      const target = current;
+      // Scoped per hop: _dns-cache.mjs patches dns.lookup process-wide, and this
+      // marks the request as provider traffic so the resolved address of THIS
+      // destination is validated, not just the one the caller asked for.
+      const res = await providerFetchContext.run({ url: target }, async () => {
+        const r = await fetch(target, {
+          headers: { 'user-agent': DEFAULT_USER_AGENT, accept: '*/*', ...headers },
+          redirect: 'manual',
+          signal: controller.signal,
+        });
+        const body = REDIRECT_STATUSES.has(r.status) ? '' : await r.text();
+        return { status: r.status, body, location: r.headers?.get?.('location') ?? null };
       });
-      const body = await res.text();
-      return { status: res.status, body, finalUrl: res.url || String(url) };
-    });
+      last = { status: res.status, body: res.body, finalUrl: target };
+      if (!REDIRECT_STATUSES.has(res.status) || !res.location) return last;
+
+      let next;
+      try {
+        next = new URL(res.location, target);
+      } catch {
+        return last;  // an unparseable Location is the end of the road
+      }
+      // Anything but https is refused rather than followed: file:, javascript:,
+      // ftp: and plain http are all ways to leave the guard behind.
+      if (next.protocol !== 'https:') return last;
+      current = next.href;
+    }
+    return last;  // the hop budget ran out; the caller sees the last 3xx
   } finally {
     clearTimeout(timer);
   }

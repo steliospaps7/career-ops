@@ -44,7 +44,7 @@ const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/;
 // the same strict charset (and rejects ".." in any of them) — it only relaxes
 // "no slash at all" to "no *unsafe* content between slashes", so the traversal/
 // injection guarantee is unchanged.
-function isSafeValue(v) {
+export function isSafeValue(v) {
   if (typeof v !== 'string' || v.length === 0) return false;
   // SAFE_SEGMENT's charset includes "." (some real segments use dots), so ".."
   // alone passes that regex — same as the single-segment guard in

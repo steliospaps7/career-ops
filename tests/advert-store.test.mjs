@@ -9,7 +9,7 @@
  * Run: node test-all.mjs --only advert-store
  */
 
-import { mkdtempSync, readFileSync, writeFileSync, readdirSync } from 'fs';
+import { mkdtempSync, readFileSync, writeFileSync, readdirSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { saveAdvert, findAdvert, loadAdvertText, advertFilename } from '../providers/_advert-reader.mjs';
@@ -113,6 +113,41 @@ function record(overrides = {}) {
   const again = saveAdvert(record({ text: 'SOMETHING ELSE '.repeat(30) }), { jdsDir, reread: true });
   eq('--reread leaves an already-read file alone', again.reused, true);
   ok('its text is unchanged', loadAdvertText(again.path, { jdsDir }).includes('Programme Manager'));
+}
+
+// ── A file the apify plugin wrote carries a full advert ─────────────
+// It has no read_status field, because the plugin does not write one. Treating
+// that absence as "not read" would make --reread delete a real advert the paid
+// reader already paid for.
+{
+  const jdsDir = tempJds();
+  mkdirSync(jdsDir, { recursive: true });
+  const name = advertFilename('Example Ltd', 'Programme Manager', 'https://careers.example.com/roles/42');
+  writeFileSync(join(jdsDir, name), [
+    '---',
+    'title: "Programme Manager"',
+    'company: "Example Ltd"',
+    'url: "https://careers.example.com/roles/42"',
+    'location: "London, UK"',
+    'scraped: "2026-09-01"',
+    'source: misceres-indeed-scraper',
+    '---',
+    '',
+    '# Programme Manager — Example Ltd',
+    '',
+    BODY,
+    '',
+  ].join('\n'));
+
+  const found = findAdvert(record(), { jdsDir });
+  eq('a file with no read_status reads as read', found?.status, 'read');
+  ok('and its advert loads', loadAdvertText(found.path, { jdsDir }).includes('Programme Manager'));
+
+  const again = saveAdvert(record(), { jdsDir, reread: true });
+  eq('--reread leaves it alone', again.reused, true);
+  ok('the file is still there', existsSync(join(jdsDir, name)));
+  ok('with the plugin\'s own source line intact', readFileSync(join(jdsDir, name), 'utf-8').includes('misceres-indeed-scraper'));
+  eq('only one file exists', readdirSync(jdsDir).length, 1);
 }
 
 // ── The filename shape is the apify plugin's ────────────────────────

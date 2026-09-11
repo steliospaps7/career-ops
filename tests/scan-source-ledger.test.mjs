@@ -67,7 +67,11 @@ const {
   const keys = SOURCE_DROP_REASONS.map((r) => r.key);
   const expected = [
     'blacklist', 'title', 'tier', 'location', 'age', 'postedDate',
-    'salary', 'content', 'countryEligibility', 'visa', 'duplicate', 'cooldown',
+    'salary',
+    // The advert reader runs here, between the free filters and the three that
+    // read the advert, and drops a posting whose own board page says it is gone.
+    'advertExpired',
+    'content', 'countryEligibility', 'visa', 'duplicate', 'cooldown',
     // --verify runs after the whole sweep, so its drops come last.
     'expired',
   ];
