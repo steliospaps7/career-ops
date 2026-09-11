@@ -250,6 +250,27 @@
 #         - "llm"
 #         - "claude"
 
+# -- Advert reader (optional) --
+# A third of the boards hand over a title and a link and no advert, so
+# content_filter, country_eligibility_filter and visa_filter read an empty
+# string and pass everything. The reader fills that gap: for each row that
+# survives the free title, tier, location and age filters with no description,
+# it works down five rungs and stops at the first that returns real text — the
+# board's page or the host's free JSON route, the destination of the apply
+# control, a headless browser, Firecrawl, and finally `unreadable`. The text is
+# stored under jds/ with the fetch time, the final URL, the rung that produced
+# it, and a status that tells "could not read" from "no criterion found".
+#
+# The four free rungs are always on and cost nothing. The paid rung is a switch
+# and a count: while it is off, the run reports how many rows reached it, and
+# that number is what decides whether the call is ever built. Turning the switch
+# on today changes the wording of that line, not the behaviour — the call, its
+# key and its per-run cap are deliberately not built yet.
+#
+# read_ladder:
+#   firecrawl:
+#     enabled: false
+
 # -- Visa / work-authorization filter (optional) --
 # Surfaces roles that sponsor a work visa (H-1B / H-1B1 / O-1 for the US, plus
 # the generic "visa sponsorship" wording) and drops roles that explicitly refuse
