@@ -431,3 +431,100 @@ function only(label, text) {
     ok('and the sentence is collapsed to one line', !/[\n\t]/.test(c.sentence));
   }
 }
+
+// ── 9. Real stored adverts the first build read wrongly ─────────────
+// Each sentence below is quoted from a file under `jds/`, found by running the
+// finished reader against all 1,354 stored adverts and comparing it with the
+// phrase list it replaces. They are the five classes of mistake that sweep
+// found, and every one of them is a decision Stelios never sees: a wrong keep
+// costs him a row to read, a wrong cut costs him the role.
+
+{
+  // Cresta: the domain named instead of the word. No "experience" anywhere near
+  // the number, and "ideally" 130 characters later is about the company being
+  // B2B, not about the five years.
+  const c = only('Cresta', 'Qualifications 5+ years in revenue operations, sales operations, GTM strategy, '
+    + 'management consulting, or corporate strategy, ideally supporting a B2B SaaS company.');
+  if (c) {
+    eq('Cresta: "5+ years in revenue operations" is an experience clause', c.minimum, 5);
+    eq('and a distant "ideally" does not withdraw the bar', c.mandatory !== false, true);
+  }
+}
+
+{
+  // Frontify and LSEG: a preference word after the clause, past a comma,
+  // modifying what follows rather than the years.
+  const frontify = only('Frontify', 'What you bring - You have 5+ years of experience in software '
+    + 'product management, ideally working with enterprise customers.');
+  if (frontify) eq('Frontify: a trailing "ideally" past a comma is not about the years', frontify.mandatory !== false, true);
+
+  const lseg = only('LSEG', "Requirements: - 5+ years' experience in product management, preferably in an Agile/SAFe environment.");
+  if (lseg) eq('LSEG: nor a trailing "preferably"', lseg.mandatory !== false, true);
+}
+
+{
+  // Amazon: the same word before the clause, where it does govern it.
+  const c = only('Amazon', 'Preferred Qualifications - 7+ years of product or program management experience.');
+  if (c) eq('Amazon: a "Preferred Qualifications" header is a wish, not a bar', c.mandatory, false);
+}
+
+{
+  // Company age with no pronoun in front of it. Five real sentences, each of
+  // which the first build cut — including Monzo's Chief of Staff, a role he
+  // wants. None may bind.
+  const history = [
+    ['Clear Drains', 'Clear Drains UK has built its reputation over 50+ years by delivering specialist commercial and domestic drainage experience.'],
+    ['Indra', 'Drawing on over 30 years of experience in urban public transport solutions, Indra will manage the programme.'],
+    ['TAIT', "With a legacy of innovation spanning over 45 years, TAIT has grown from pioneering in rock 'n' roll staging experience."],
+    ['the IRC', 'BACKGROUND Over the past 90 years, the International Rescue Committee has developed unparalleled experience.'],
+    ['Monzo', 'After starting as a prepaid card, our product offering has grown a lot in the last 10 years in ways that shape the experience.'],
+    ['Paloma', 'Mark and Darshak, with their 25 years of combined NHS experience, including building services that reach millions.'],
+    ['UBT', 'Our client is a joinery specialist with more than 30 years of experience delivering premium interior solutions.'],
+  ];
+  // UBT's real sentence is longer than this one, and its "Our client" sits 75
+  // characters from the number — beyond the cue's reach, so the real advert
+  // still reads `unknown` and still binds. Named in the build log as a residual
+  // rather than fixed with a cue close enough to the number to be unsafe:
+  // "experience delivering" is what a candidate requirement says too.
+  let bound = 0;
+  for (const [label, text] of history) {
+    const clauses = binding(text);
+    if (clauses.length > 0) { bound++; fail(`${label}'s own history binds the row: ${JSON.stringify(clauses)}`); }
+  }
+  if (bound === 0) pass(`none of the ${history.length} company-history sentences binds the row`);
+}
+
+{
+  // An age bar, a sabbatical, a residency rule and a loyalty gift are not
+  // experience, however many years they name.
+  const notExperience = [
+    ['Gopuff', 'You Have: - Must be 18 years or older - Experience working in a restaurant, retail or warehouse environment.'],
+    ['SuperAwesome', '- 30 day sabbatical for employees who have reached 7 years tenure - AXA Private Medical Insurance and experience days.'],
+    ['UKHSA', 'You should normally have been resident in the United Kingdom for the last 5 years as the role requires security experience clearance.'],
+    ['Zava', '* Gift vouchers after 3, 5, 10 years of service with us, plus experience days.'],
+    ['9fin', 'Work abroad for up to 3 months a year, 1 month paid sabbatical after 5 years of service, and experience days.'],
+  ];
+  let bound = 0;
+  for (const [label, text] of notExperience) {
+    const clauses = binding(text).filter(c => c.minimum >= 5);
+    if (clauses.length > 0) { bound++; fail(`${label}: a non-experience sentence binds the row: ${JSON.stringify(clauses)}`); }
+  }
+  if (bound === 0) pass(`none of the ${notExperience.length} age, tenure, residency or loyalty sentences binds the row`);
+}
+
+{
+  // And the catches the phrase list could never have made, because no entry
+  // spelled them: Welcome to the Jungle's metadata line, a slashed pair, and
+  // an apostrophe form.
+  const caught = [
+    ['WTTJ metadata', 'Job summary Permanent contract London Occasional remote Experience: > 5 years Skills & expertise Analytical thinking.', 5],
+    ['a slashed pair', 'You have 6/8 years of experience in project management within a scale-up.', 6],
+    ["an apostrophe form", "Key Requirements • 8–15 years' experience in biotech, pharma or another regulated environment.", 8],
+    ['a two-digit range', 'Job Title: OSS Designer Experience Level: 08-15 Years of relevant experience.', 8],
+  ];
+  for (const [label, text, expected] of caught) {
+    const clauses = binding(text).filter(c => c.minimum >= 5);
+    if (clauses.some(c => c.minimum === expected)) pass(`${label} is now read as a minimum of ${expected}`);
+    else fail(`${label} read ${JSON.stringify(clauses)}, expected a clause at ${expected}`);
+  }
+}

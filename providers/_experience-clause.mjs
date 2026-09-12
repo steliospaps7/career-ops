@@ -41,10 +41,11 @@ const NUMBER_WORDS = {
 
 const NUMBER = `(?:\\d{1,2}|${Object.keys(NUMBER_WORDS).join('|')})`;
 
-/** The hyphen, the en dash, the em dash and the word, all of them ranges.
+/** The hyphen, the en dash, the em dash, the slash and the word, all of them
+ * ranges — Pivot's real advert reads "6/8 years of experience".
  * "up to" is absent on purpose: "up to 5 years" is a ceiling, and this module
  * reads lower bounds only. */
-const RANGE = '(?:-|–|—|to)';
+const RANGE = '(?:-|–|—|/|to)';
 
 /** "5 or more years" puts its filler between the number and the word. It says
  * nothing the lower bound does not already say, so it is skipped rather than
@@ -71,6 +72,37 @@ const CLAUSE_RE = new RegExp(
  */
 const EXPERIENCE_RE = /experien|background|track record|in a similar role|tenure|seniority/i;
 
+/**
+ * The other half of the same test, for the shape that names the domain instead
+ * of the word: "5+ years in revenue operations", "5 years as a product
+ * manager". Cresta's real advert reads "Qualifications 5+ years in revenue
+ * operations, sales operations, GTM strategy" with no "experience" anywhere
+ * near it, and the first build kept the row — a false keep the phrase list it
+ * replaced did not have. Anchored at the match, so it reads what directly
+ * follows the number and not the rest of the page: "at least every five years.
+ * Completing this form…" does not qualify, and neither does "growing 4x YOY
+ * for 5 years."
+ *
+ * "of" is deliberately absent. It is how an advert states its own age — "Build
+ * on 50+ Years of Success", "Building on 21 years of continuous growth", "over
+ * 60 years of attitude and heritage" — and admitting it dropped three real
+ * stored adverts on the employer's history, which is the very thing finding A04
+ * is about. "5 years of experience" still reads, through the word cue above.
+ */
+const DOMAIN_RE = /^\s*(?:in|within|as|working)\s+(?!the\b|a\b|an\b|this\b|that\b|these\b|our\b|their\b|its\b|last\b|past\b|recent\b|order\b)[a-z]/i;
+
+/**
+ * Sentences that carry a years number and are plainly not about the reader's
+ * experience, whatever else is near them. All four shapes are from real stored
+ * adverts: Gopuff's "Must be 18 years old", SuperAwesome's "30 day sabbatical
+ * for employees who have reached 7 years tenure", the UK Health Security
+ * Agency's "resident in the United Kingdom for the last 5 years", and Zava's
+ * "Gift vouchers after 3, 5, 10 years". Each was dropped by the first build,
+ * and each is a role the old phrase list kept — so a wrong cut here is a
+ * regression, and an invisible one.
+ */
+const NOT_EXPERIENCE_RE = /\byears?\s+(?:old\b|or older\b|of age\b)|sabbatical|\btenure\b|\bresident\b|gift voucher|anniversary|long.service/i;
+
 /** Windows, in characters, either side of the phrase. Bounded so one enormous
  * bullet block does not read as one sentence. A stored advert really is one
  * line: the bullets carry no full stops. */
@@ -87,6 +119,33 @@ const RELEVANCE_WINDOW = 150;
 
 /** The quoted sentence is read by a person on a DROP line, so it is capped. */
 const SENTENCE_CAP = 240;
+
+/**
+ * How close a cue has to sit to the number before it is read as describing it.
+ *
+ * Cresta's real advert reads "Qualifications 5+ years in revenue operations,
+ * sales operations, GTM strategy, management consulting, or corporate strategy,
+ * ideally supporting a B2B SaaS company". The "ideally" is about the company
+ * being B2B, not about the five years, and without this cap it withdrew a bar
+ * the advert plainly states. A cue further away than this is ignored, which
+ * leaves `mandatory` null — and null binds, so the safe direction.
+ */
+const CUE_REACH = 70;
+
+/**
+ * How far *after* the clause a preference word is still read as describing it.
+ *
+ * A preference before the clause governs it: "Preferred Qualifications - 7+
+ * years", "We'd love it if you have 3–5+ years", "Nice to have: 6+ years".
+ * After the clause and past a comma it almost always modifies what follows
+ * instead — Frontify's "5+ years of experience in software product management,
+ * ideally working with…" and LSEG's "5+ years' experience in product
+ * management, preferably in an Agile/SAFe environment" are both plain bars, and
+ * reading them as wishes kept two roles the old phrase list cut. The forms that
+ * really do trail the number sit right against it: "5+ years is preferred, not
+ * required", "5+ years of experience would be a plus".
+ */
+const TRAILING_WISH_REACH = 25;
 
 const MANDATORY_CUES = [
   'must have', 'must', 'required', 'requires', 'require', 'requirement',
@@ -116,6 +175,18 @@ const COMPANY_CUES = [
   'our company has', 'our team has', 'the company has', 'we serve',
   'we have served', 'founded', 'we were established',
   'has been trading',
+  // The shapes a company uses for its own age with no pronoun in front of it,
+  // each from a real stored advert that the first build cut: Indra's "Drawing
+  // on over 30 years of experience in urban public transport", Clear Drains'
+  // "built its reputation over 50+ years", TAIT's "legacy of innovation
+  // spanning over 45 years", the IRC's "Over the past 90 years", Monzo's "our
+  // product offering has grown a lot in the last 10 years", and Paloma's "their
+  // 25 years of combined NHS experience", which is the founders' and not his.
+  'legacy of', 'spanning', 'over the past', 'drawing on', 'built its reputation',
+  'our partner has', 'has grown', 'combined', 'was established', 'has been operating',
+  // "Our client is a highly respected bespoke joinery specialist with more than
+  // 30 years of experience delivering…" — an agency describing the employer.
+  'our client',
   // Spelled out rather than a bare "in business": Navan's real advert says
   // "5+ years experience in business operations", and the short form read that
   // requirement as the employer's own age and would have kept the row.
@@ -155,13 +226,17 @@ function cueHits(haystack, cues) {
   return hits;
 }
 
-/** The nearest cue to the phrase wins. A sentence carrying both a bar and a
- * wish ("5+ years required, and we'd love it if you also …") means whichever
- * word sits next to the number. */
-function nearest(hits, at) {
+/** The nearest cue to the phrase wins, and only if it is within reach. A
+ * sentence carrying both a bar and a wish ("5+ years required, and we'd love it
+ * if you also …") means whichever word sits next to the number. */
+function nearest(hits, at, end = at, trailingReach = CUE_REACH) {
   let best = null;
   for (const hit of hits) {
-    const distance = Math.abs(hit.at - at);
+    // Measured from whichever edge of the clause the cue sits beyond, so the
+    // reach means the same thing for "5+ years" and "at least five years".
+    const trailing = hit.at > end;
+    const distance = trailing ? hit.at - end : Math.abs(hit.at - at);
+    if (distance > (trailing ? trailingReach : CUE_REACH)) continue;
     if (!best || distance < best.distance) best = { ...hit, distance };
   }
   return best;
@@ -174,23 +249,24 @@ function isNegated(haystack, at) {
   return /\b(?:not|never|n't)\s+$/.test(before);
 }
 
-function readMandatory(window, at) {
+function readMandatory(window, at, end) {
   const bars = cueHits(window, MANDATORY_CUES)
     .map(hit => ({ ...hit, value: isNegated(window, hit.at) ? false : true }));
   const wishes = cueHits(window, PREFERENCE_CUES).map(hit => ({ ...hit, value: false }));
-  const all = [...bars, ...wishes];
-  if (all.length === 0) return null;
   // A tie goes to the preference: the cost of reading a wish as a bar is a role
   // he never sees, and the cost the other way is one row he reads and discards.
-  const wish = nearest(all.filter(h => h.value === false), at);
-  const bar = nearest(all.filter(h => h.value === true), at);
+  const wish = nearest([...bars, ...wishes].filter(h => h.value === false), at, end, TRAILING_WISH_REACH);
+  const bar = nearest(bars.filter(h => h.value === true), at, end);
+  // Neither word within reach: the advert has not said, and the gate reads an
+  // unstated bar as a bar. A plain requirements list is the common shape.
+  if (!wish && !bar) return null;
   if (wish && bar) return wish.distance <= bar.distance ? false : true;
   return wish ? false : true;
 }
 
-function readSubject(window, at) {
-  const candidate = nearest(cueHits(window, CANDIDATE_CUES), at);
-  const company = nearest(cueHits(window, COMPANY_CUES), at);
+function readSubject(window, at, end) {
+  const candidate = nearest(cueHits(window, CANDIDATE_CUES), at, end);
+  const company = nearest(cueHits(window, COMPANY_CUES), at, end);
   if (candidate && company) return candidate.distance <= company.distance ? 'candidate' : 'company';
   if (candidate) return 'candidate';
   if (company) return 'company';
@@ -275,7 +351,9 @@ export function extractExperienceClauses(text) {
       Math.max(0, m.index - RELEVANCE_WINDOW),
       Math.min(lower.length, m.index + m[0].length + RELEVANCE_WINDOW),
     );
-    if (!EXPERIENCE_RE.test(near)) continue;
+    const after = flat.slice(m.index + m[0].length, m.index + m[0].length + 24);
+    if (!EXPERIENCE_RE.test(near) && !DOMAIN_RE.test(after)) continue;
+    if (NOT_EXPERIENCE_RE.test(near)) continue;
 
     // The cues and the quote come from the clause's own sentence, so a
     // preference in one half of a semicolon does not answer for the other.
@@ -285,13 +363,14 @@ export function extractExperienceClauses(text) {
     const window = lower.slice(from, to);
 
     const at = m.index - from;
-    let mandatory = readMandatory(window, at);
+    const end = at + m[0].trimEnd().length;
+    let mandatory = readMandatory(window, at, end);
     if (withdrawal !== -1 && withdrawal >= bounds.start) mandatory = false;
 
     clauses.push({
       minimum,
       mandatory,
-      subject: readSubject(window, at),
+      subject: readSubject(window, at, end),
       sentence: quote(flat, bounds.start, bounds.end, m.index, m.index + m[0].length),
     });
   }
