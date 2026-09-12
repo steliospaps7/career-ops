@@ -78,6 +78,13 @@ import {
   defaultTransports,
 } from './providers/_advert-reader.mjs';
 import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter } from './title-keywords.mjs';
+import {
+  routeDetail,
+  routeByTier,
+  loadTiersTable,
+  ROUTE_BUCKETS,
+  ROUTE_BUCKET_LABELS,
+} from './providers/_role-route.mjs';
 import { flagValue, hasFlag, validateFlags } from './lib/cli-flags.mjs';
 import { withPortalHealthLock } from './portal-health-lock.mjs';
 import { localToday } from './lib/local-today.mjs';
@@ -96,7 +103,7 @@ try {
 const parseYaml = yaml.load;
 
 // ── Config ──────────────────────────────────────────────────────────
-import { getCareerOpsRoot } from './path-resolver.mjs';
+import { getCareerOpsRoot, resolveTrackerPath } from './path-resolver.mjs';
 const CODE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA_ROOT = getCareerOpsRoot();
 
@@ -119,7 +126,23 @@ export const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE || path.join(DATA_R
 // path; the apify plugin writes the same filename shape into the same folder,
 // so jd-capture.mjs resolves either writer's file.
 export const JDS_DIR = path.join(DATA_ROOT, 'jds');
-const APPLICATIONS_PATH = path.join(DATA_ROOT, 'data/applications.md');
+// The tier table (ticket B2). data/companies.tsv belongs to the Tiers chat:
+// this scanner reads it and never writes it, and a company it does not name is
+// untiered rather than an error.
+//
+// CAREER_OPS_TIERS is a TEST SEAM, not a documented user override: it exists so
+// a run can be pointed at a fixture table instead of the real one. It is
+// deliberately absent from AGENTS.md and DATA_CONTRACT.md. If it ever becomes
+// something a user is told to set, it needs a row there and a line in the
+// docs; until then, treat it as internal.
+export const TIERS_PATH = process.env.CAREER_OPS_TIERS || path.join(DATA_ROOT, 'data/companies.tsv');
+// The tracker, through the repo's own resolver rather than a sixth spelling of
+// the same rule: it honours CAREER_OPS_TRACKER, canonicalises symlinks, and
+// carries the `{DATA_ROOT}/applications.md` fallback AGENTS.md records. The
+// scanner used to hard-code the path and so could not be pointed at a copy,
+// which is what `--read-pipeline --gate` needs to be proved against. Read-only
+// here: nothing in this file writes the tracker.
+const APPLICATIONS_PATH = resolveTrackerPath(DATA_ROOT);
 const PROVIDERS_DIR = path.resolve(CODE_ROOT, 'providers');
 
 // Ensure required directories exist (fresh setup). Stays rooted in the user-data
@@ -1611,6 +1634,31 @@ const ROLE_LOCATION_SUFFIXES = new Set([
   'zurich',
 ]);
 
+/**
+ * The location suffixes that are whole markets rather than one office.
+ *
+ * A city or a country after the title is how one company splits one requisition
+ * per office, and collapsing those onto one key is what this normalizer exists
+ * for. A region is not that: "Account Executive, EMEA" and "Account Executive,
+ * Americas" are two jobs on two continents, and one key for both means the
+ * second is dropped as a duplicate and never reaches the queue.
+ *
+ * So a region is kept in the key, in the bracketed spelling as well as the
+ * comma one. That is also what makes the two spellings agree — both keep the
+ * region rather than both losing it — which is the Anthropic case seam 7 was
+ * written for (ticket B2).
+ */
+const ROLE_REGION_SUFFIXES = new Set([
+  'amer',
+  'americas',
+  'apac',
+  'emea',
+  'eu',
+  'europe',
+  'latin america',
+  'north america',
+]);
+
 const ROLE_REMOTE_SUFFIXES = new Set([
   'distributed',
   'hybrid',
@@ -1667,6 +1715,35 @@ function isRoleLocationSuffix(tag) {
 }
 
 /**
+ * Whether a trailing tag names a whole market, and so must stay in the key.
+ *
+ * Read the same way `isRoleLocationSuffix` reads a tag — the whole tag, then
+ * its comma/slash-separated parts, then the "Remote EMEA" shape — so a mixed
+ * tag like "(EMEA, Remote)" counts as a region rather than slipping through as
+ * a plain place.
+ */
+function roleSuffixIsRegion(tag) {
+  const normalized = normalizeRoleSuffixTag(tag);
+  if (!normalized) return false;
+  if (ROLE_REGION_SUFFIXES.has(normalized)) return true;
+
+  const raw = String(tag ?? '').toLowerCase();
+  const parts = raw
+    .split(/[,/|;]+|\s+(?:and|or)\s+/g)
+    .map(normalizeRoleSuffixTag)
+    .filter(Boolean);
+  if (parts.some(part => ROLE_REGION_SUFFIXES.has(part))) return true;
+
+  for (const remote of ROLE_REMOTE_SUFFIXES) {
+    const prefix = `${remote} `;
+    if (normalized.startsWith(prefix) && ROLE_REGION_SUFFIXES.has(normalized.slice(prefix.length))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Normalize a role title for stable scan-time duplicate identity.
  *
  * Equivalent tracker/provider titles should collapse to one key when a company
@@ -1698,9 +1775,27 @@ export function normalizeRoleForDedup(role) {
   // a key fix) and is deliberately out of scope here.
   let title = String(role ?? '').normalize('NFKC').toLowerCase();
   while (true) {
-    const match = title.match(/\s*[\[(]([^[\]()]+)[\])]\s*$/);
+    // Two spellings of the same tag, and the comma form is the one that cost a
+    // duplicate (ticket B2, seam 7). "Applied AI Strategist, EMEA" was cut on
+    // 4 September 2026 and came back on 9 September as "Applied AI Strategist
+    // (EMEA)" through another board: the bracketed form was stripped, the comma
+    // form was not, so the two keys disagreed and the row entered the queue
+    // again. Both forms now read the same vocabulary, so a squad or a
+    // department after the comma ("Product Owner, Activation Squad") is still
+    // kept — only a place is dropped, exactly as the bracketed form has always
+    // behaved.
+    const match = title.match(/\s*[\[(]([^[\]()]+)[\])]\s*$/)
+      || title.match(/\s*,\s*([^,]+?)\s*$/);
     if (!match || !isRoleLocationSuffix(match[1])) break;
-    title = title.slice(0, match.index).trimEnd();
+    // A region stays in the key. Dropping it merged two continents' worth of
+    // one title into one row and lost the second as a duplicate; keeping it is
+    // also what makes the bracketed and the comma spelling agree.
+    if (roleSuffixIsRegion(match[1])) break;
+    // A title that is nothing but the tag ("EMEA") must not key to '' and bury
+    // every other role at that company.
+    const stripped = title.slice(0, match.index).trimEnd();
+    if (!stripped) break;
+    title = stripped;
   }
   // Unicode-aware (#2393 family): the [a-z0-9] strip this used to carry keyed
   // every non-Latin title to '', so バックエンドエンジニア and フロントエンド
@@ -1846,6 +1941,348 @@ export function loadSeenCompanyRoles(
   }, policy, canonicalize);
 }
 
+// ── Dedup against the tracker (ticket B2, seam 7) ───────────────────
+//
+// A role already in `data/applications.md` must never be queued again, whether
+// it comes back under the same link or under another board's link and a
+// slightly different title. Two keys carry it, and both are checked before any
+// route or drop:
+//
+//   1. the posting URL, through `normalizeUrlForDedup`;
+//   2. company plus title, through the same canonicalisers
+//      `collectSeenCompanyRoles` uses.
+//
+// The tracker has no URL column and must not grow one. Its URLs are the inline
+// ones in the row text — 39 rows carry a trailing `link: <url>` cell — plus the
+// `**URL:**` header of each report a row links to. The tracker is read here and
+// never written.
+//
+// The pipeline text is deliberately NOT a source: every pending line would then
+// match itself and the whole queue would move to Processed as duplicates.
+
+const REPORT_URL_HEADER_RE = /^\*\*URL:\*\*\s*(\S+)/m;
+
+/** The report files one tracker row links to, resolved against the tracker's own directory. */
+function trackerRowReportPaths(row, trackerDir) {
+  const cell = String(row.report ?? '');
+  const out = [];
+  for (const m of cell.matchAll(/\]\(([^)]+)\)/g)) {
+    const target = m[1].trim();
+    if (!target || /^https?:/i.test(target)) continue;
+    out.push(path.resolve(trackerDir, target));
+  }
+  return out;
+}
+
+/**
+ * Build the two lookups from the tracker text.
+ *
+ * Each entry carries the row number back, so a drop can name the row Stelios
+ * would open to check it.
+ *
+ * @param {{applicationsText?: string, trackerPath?: string, canonicalize?: Function}} options
+ * @returns {{byUrl: Map<string, object>, byCompanyRole: Map<string, object>}}
+ */
+export function collectTrackerDedupIndex({
+  applicationsText = '',
+  trackerPath = APPLICATIONS_PATH,
+  canonicalize = defaultCompanyNormalizer,
+} = {}) {
+  const byUrl = new Map();
+  const byCompanyRole = new Map();
+  if (!applicationsText) return { byUrl, byCompanyRole };
+
+  const trackerDir = path.dirname(trackerPath);
+  const lines = applicationsText.split('\n');
+  const colmap = resolveColumns(lines);
+
+  for (const line of lines) {
+    const row = parseTrackerRow(line, colmap);
+    if (!row) continue;
+    const company = String(row.company ?? '').trim();
+    const role = String(row.role ?? '').trim();
+    // Header and markdown-separator cells are not rows, the same guard
+    // collectSeenCompanyRoles applies.
+    if (!company || !role) continue;
+    if (company.toLowerCase() === 'company') continue;
+    if (/^[-:]+$/.test(company) || /^[-:]+$/.test(role)) continue;
+
+    const entry = { row: row.num, company, role, status: String(row.status ?? '').trim() };
+
+    const pairKey = companyRoleDedupKey(company, role, canonicalize);
+    if (!byCompanyRole.has(pairKey)) byCompanyRole.set(pairKey, entry);
+
+    // Inline URLs in the row text: the `link:` cell, and any other link the
+    // notes carry. The report cell's own markdown link is a local path and is
+    // read below for the posting URL it records, not treated as one itself.
+    for (const m of line.matchAll(/https?:\/\/[^\s|)\]]+/g)) {
+      const key = normalizeUrlForDedup(m[0]);
+      if (!byUrl.has(key)) byUrl.set(key, entry);
+    }
+
+    // The `**URL:**` header of each report the row links to. This is where the
+    // posting URL lives for every evaluated row, because the tracker itself
+    // records none.
+    for (const reportPath of trackerRowReportPaths(row, trackerDir)) {
+      if (!existsSync(reportPath)) continue;
+      let text = '';
+      try {
+        text = readFileSync(reportPath, 'utf-8');
+      } catch {
+        continue;
+      }
+      const found = text.match(REPORT_URL_HEADER_RE);
+      if (!found || !/^https?:/i.test(found[1])) continue;
+      const key = normalizeUrlForDedup(found[1]);
+      if (!byUrl.has(key)) byUrl.set(key, entry);
+    }
+  }
+
+  return { byUrl, byCompanyRole };
+}
+
+/** Filesystem wrapper, mirroring loadSeenUrls. A missing tracker is no index. */
+export function loadTrackerDedupIndex({
+  trackerPath = APPLICATIONS_PATH,
+  canonicalize = defaultCompanyNormalizer,
+} = {}) {
+  return collectTrackerDedupIndex({
+    applicationsText: readIfExists(trackerPath),
+    trackerPath,
+    canonicalize,
+  });
+}
+
+/**
+ * The tracker row a queued posting duplicates, or null.
+ *
+ * The URL is tried first because it is the deterministic key; the pair is what
+ * catches a re-listing under a different link, and it is the only key a
+ * `local:jds/...` queue line has until ticket B3 stops the apify plugin
+ * swapping the URL column.
+ *
+ * @returns {{row: number, company: string, role: string, key: 'url'|'company-role'}|null}
+ */
+export function matchTrackerDuplicate({ url, company, title }, index, canonicalize = defaultCompanyNormalizer) {
+  if (!index) return null;
+  const cleanUrl = typeof url === 'string' ? url.trim() : '';
+  if (cleanUrl && /^https?:/i.test(cleanUrl)) {
+    const hit = index.byUrl.get(normalizeUrlForDedup(cleanUrl));
+    if (hit) return { ...hit, key: 'url' };
+  }
+  const c = String(company ?? '').trim();
+  const r = String(title ?? '').trim();
+  if (!c || !r) return null;
+  const hit = index.byCompanyRole.get(companyRoleDedupKey(c, r, canonicalize));
+  return hit ? { ...hit, key: 'company-role' } : null;
+}
+
+/** The reason written onto the line when it moves to Processed. */
+export function formatTrackerDuplicateReason(match) {
+  if (!match) return '';
+  return `skipped (duplicate: tracker row ${match.row}, ${match.company} ${match.role})`;
+}
+
+// ── The gate and the route (ticket B2) ──────────────────────────────
+//
+// B1 filled `job.description` from a stored read. This is the half that decides
+// what the filled description costs the row: the three advert filters bite on
+// it, a row nobody could read is never dropped on it, and every surviving row
+// is labelled with the effort it will get before a single evaluation token is
+// spent.
+
+/**
+ * Why a row was dropped, in the words of the filter that dropped it.
+ *
+ * The filters themselves return a bare boolean, and rebuilding their decision
+ * here would be a second copy of the rule. So this re-runs only the *matching*
+ * half against the same configuration and names the first phrase that hit.
+ * Called on the drop path alone, so a clean run does no extra work.
+ */
+export function buildDropExplainer(config = {}, candidateCountry = '') {
+  const cf = config.content_filter || null;
+  const byTitleKeyword = new Map();
+  if (cf?.by_title_keyword && typeof cf.by_title_keyword === 'object' && !Array.isArray(cf.by_title_keyword)) {
+    for (const [kw, rule] of Object.entries(cf.by_title_keyword)) {
+      if (typeof kw !== 'string' || !kw.trim()) continue;
+      byTitleKeyword.set(kw.trim().toLowerCase(), rule);
+    }
+  }
+
+  const named = (list) => normalizeKeywordList(list).map(k => ({ keyword: k, match: compileContentKeyword(k) }));
+  const globalNegative = cf ? named(cf.negative) : [];
+  const globalPositive = cf ? named(cf.positive) : [];
+
+  const eligibility = config.country_eligibility_filter || null;
+  const exclusionary = eligibility ? normalizeKeywordList(eligibility.exclusionary) : [];
+
+  const vf = config.visa_filter || null;
+  const visaNegative = vf
+    ? normalizeKeywordList(vf.negative != null ? vf.negative : DEFAULT_VISA_NEGATIVE)
+    : [];
+
+  function firstHit(entries, lower) {
+    for (const entry of entries) if (entry.match(lower)) return entry.keyword;
+    return '';
+  }
+
+  return function explain(reason, description, matchedKeywords = []) {
+    const lower = String(description ?? '').toLowerCase();
+    if (!lower.trim()) return '';
+
+    if (reason === 'content') {
+      const overrides = matchedKeywords
+        .filter(k => typeof k === 'string')
+        .map(k => byTitleKeyword.get(k.trim().toLowerCase()))
+        .filter(Boolean);
+      if (overrides.length > 0) {
+        for (const rule of overrides) {
+          const hit = firstHit(named(rule?.negative), lower);
+          if (hit) return hit;
+        }
+        return 'no required keyword';
+      }
+      const hit = firstHit(globalNegative, lower);
+      if (hit) return hit;
+      return globalPositive.length > 0 ? 'no required keyword' : '';
+    }
+
+    if (reason === 'countryEligibility') {
+      const country = String(candidateCountry ?? '').toLowerCase().trim();
+      for (const phrase of exclusionary) {
+        if (lower.includes(phrase)) return phrase;
+      }
+      return country ? `not open to ${candidateCountry}` : 'not open to this country';
+    }
+
+    if (reason === 'visa') {
+      for (const phrase of visaNegative) {
+        if (lower.includes(phrase)) return phrase;
+      }
+      return 'no sponsorship mentioned';
+    }
+
+    return '';
+  };
+}
+
+/** The three drop reasons the gate can return, in the order it tries them. */
+export const ADVERT_DROP_REASONS = ['content', 'countryEligibility', 'visa'];
+
+export const ADVERT_DROP_LABELS = {
+  content: 'content',
+  countryEligibility: 'eligibility',
+  visa: 'visa',
+};
+
+/**
+ * The one rule the sweep and the standalone pass share, so the two can never
+ * drift on what a stored advert costs a row.
+ *
+ * A row whose read status is anything but `read` is kept, whatever the three
+ * filters would say about the empty string it carries: nothing is dropped on an
+ * advert nobody read. A row that arrived with the board's own description has
+ * no read status at all and is filtered exactly as it always was.
+ *
+ * @returns {{drop: boolean, reason?: string, phrase?: string, unread?: boolean}}
+ */
+export function buildAdvertGate({ contentFilter, countryEligibilityFilter, visaFilter, explain }) {
+  const pass = () => true;
+  const content = contentFilter || pass;
+  const eligibility = countryEligibilityFilter || pass;
+  const visa = visaFilter || pass;
+  const why = explain || (() => '');
+
+  return function gate({ description = '', matchedKeywords = [], readStatus = null } = {}) {
+    if (readStatus != null && readStatus !== 'read') return { drop: false, unread: true };
+    if (!content(description, matchedKeywords)) {
+      return { drop: true, reason: 'content', phrase: why('content', description, matchedKeywords) };
+    }
+    if (!eligibility(description)) {
+      return { drop: true, reason: 'countryEligibility', phrase: why('countryEligibility', description) };
+    }
+    if (!visa(description)) {
+      return { drop: true, reason: 'visa', phrase: why('visa', description) };
+    }
+    return { drop: false };
+  };
+}
+
+/**
+ * One line per row the advert dropped, so a wrong drop can be rescued in one
+ * click and a missed one earns a line in the filter.
+ *
+ * The stored advert is named where there is one. A row whose board handed over
+ * its own description has no stored file, so the line names the posting URL
+ * instead: it must always point at something Stelios can open.
+ */
+export function formatAdvertDropRow(row) {
+  const label = ADVERT_DROP_LABELS[row.reason] || row.reason || 'advert';
+  const phrase = row.phrase ? `: "${row.phrase}"` : '';
+  const where = row.jdPath ? `jd: local:${row.jdPath}` : (row.url || '');
+  return `DROP | ${row.company || '?'} | ${row.title || '?'} | ${label}${phrase}${where ? ` | ${where}` : ''}`;
+}
+
+/** An empty route tally, one counter per bucket. */
+export function emptyRouteTally() {
+  const tally = { score: 0, standard: 0, buckets: {} };
+  for (const bucket of [...ROUTE_BUCKETS.score, ...ROUTE_BUCKETS.standard]) tally.buckets[bucket] = 0;
+  return tally;
+}
+
+export function countRoute(tally, detail) {
+  if (!tally || !detail) return;
+  if (detail.route === 'score') tally.score++;
+  else tally.standard++;
+  tally.buckets[detail.bucket] = (tally.buckets[detail.bucket] || 0) + 1;
+}
+
+/** An empty drop tally, one counter per reason. */
+export function emptyAdvertDropTally() {
+  const tally = { total: 0, byReason: {}, rows: [] };
+  for (const reason of ADVERT_DROP_REASONS) tally.byReason[reason] = 0;
+  return tally;
+}
+
+export function countAdvertDrop(tally, row) {
+  if (!tally || !row) return;
+  tally.total++;
+  tally.byReason[row.reason] = (tally.byReason[row.reason] || 0) + 1;
+  tally.rows.push(row);
+}
+
+/**
+ * The two lines B2 adds under B1's three. The shape is the decision Stelios
+ * reads, so it is given exactly rather than derived.
+ */
+export function formatGateSummary(dropTally, routeTally) {
+  const lines = [];
+
+  if (dropTally && dropTally.total > 0) {
+    const breakdown = ADVERT_DROP_REASONS
+      .filter(r => dropTally.byReason[r] > 0)
+      .map(r => `${ADVERT_DROP_LABELS[r]} ${dropTally.byReason[r]}`)
+      .join(', ');
+    lines.push(
+      `Dropped on advert:     ${dropTally.total}${breakdown ? `         (${breakdown})` : ''}`
+      + '               each named below',
+    );
+  }
+
+  if (routeTally && (routeTally.score > 0 || routeTally.standard > 0)) {
+    const part = (route) => {
+      const detail = ROUTE_BUCKETS[route]
+        .filter(b => routeTally.buckets[b] > 0)
+        .map(b => `${ROUTE_BUCKET_LABELS[b]}: ${routeTally.buckets[b]}`)
+        .join(', ');
+      return `${route} ${routeTally[route]}${detail ? `   (${detail})` : ''}`;
+    };
+    lines.push(`Routes:                ${part('score')}   ${part('standard')}`);
+  }
+
+  return lines;
+}
+
 // ── Pipeline writer ─────────────────────────────────────────────────
 
 function normalizeScanScalar(value) {
@@ -1956,6 +2393,12 @@ export function formatPipelineOffer(offer) {
   // triage to read it. An offer with no stored advert produces no segment.
   const jd = typeof offer.jdPath === 'string' ? offer.jdPath.trim() : '';
   if (jd) line = `${line} | jd: ${sanitizeMarkdownField(`local:${jd}`)}`;
+  // Labeled route segment (ticket B2) — which effort this row gets, decided
+  // before any evaluation token is spent. Ordered after jd:, before note:, for
+  // a stable serialization. An offer with no route produces no segment, so a
+  // caller that never routes writes byte-identical lines.
+  const route = typeof offer.route === 'string' ? offer.route.trim() : '';
+  if (route) line = `${line} | route: ${sanitizeMarkdownField(route)}`;
   // Optional free-text ranking signal (e.g. a curated-list flag an importer
   // attaches). Labeled — not positional like location/compensation — so it can
   // ride on any row shape (bare URL, 3-, 4-, or 5-column) without a reader
@@ -1988,6 +2431,76 @@ export function insertJdSegment(line, relPath) {
   const noteAt = line.indexOf('| note:');
   if (noteAt === -1) return `${line.replace(/\s+$/, '')} ${segment}`;
   return `${line.slice(0, noteAt)}${segment} ${line.slice(noteAt)}`;
+}
+
+
+// The route segment on an existing queue line, e.g. `| route: score`. Read and
+// written by the standalone pass, which labels lines the scan wrote on an
+// earlier day.
+const ROUTE_SEGMENT_RE = /\|\s*route:\s*(score|standard)\b/i;
+
+/** The route a queue line already carries, or null. */
+export function extractRouteSegment(line) {
+  const m = String(line).match(ROUTE_SEGMENT_RE);
+  return m ? m[1].toLowerCase() : null;
+}
+
+/**
+ * Add or replace the segment on a queue line, after `jd:` and before `note:`
+ * so the serialization matches what formatPipelineOffer writes.
+ *
+ * Unlike `insertJdSegment` this one overwrites: the tier table is the Tiers
+ * chat's file and changes under us, so a re-run must be able to correct a route
+ * it labelled last week. The stored advert is the opposite case — re-reading a
+ * posting the run already read is exactly what the idempotent store prevents.
+ */
+export function insertRouteSegment(line, route) {
+  if (!route) return line;
+  const segment = `| route: ${sanitizeMarkdownField(route)}`;
+  if (extractRouteSegment(line)) {
+    return String(line).replace(ROUTE_SEGMENT_RE, segment);
+  }
+  const noteAt = line.indexOf('| note:');
+  if (noteAt === -1) return `${line.replace(/\s+$/, '')} ${segment}`;
+  return `${line.slice(0, noteAt)}${segment} ${line.slice(noteAt)}`;
+}
+
+/**
+ * Company and title from a queue line, for the tracker dedup and the route.
+ *
+ * `extractPipelineCompanyRole` is the scan's own dedup reader and deliberately
+ * yields nothing for a struck-out or pre-screened line. This one is the gate's,
+ * and it has one job that reader does not: a line whose URL cell was replaced
+ * with `local:jds/...` by the apify plugin still carries a company and a title,
+ * and until ticket B3 stops that swap the pair is the only key such a line has.
+ */
+export function pipelineLineIdentity(line) {
+  const entry = pipelineEntry(line, PIPELINE_CHECKBOX_RE);
+  if (!entry) return null;
+  const cells = entry.body.split('|').map(cell => cell.trim());
+  if (cells[0].startsWith('#--')) return null;
+  let urlIndex = cells.findIndex(cell => PIPELINE_URL_RE.test(cell));
+  let url = '';
+  let localPath = '';
+  if (urlIndex !== -1) {
+    url = cells[urlIndex].match(PIPELINE_URL_RE)[0];
+  } else {
+    // The apify plugin's shape: `- [ ] local:jds/<file> | Company | Title | …`.
+    // The stored advert is in the URL cell rather than a `jd:` segment, so it is
+    // returned here and the gate reads it from there. Ticket B3 stops the swap;
+    // until then this is the only advert such a line points at.
+    urlIndex = cells.findIndex(cell => /^local:/i.test(cell));
+    if (urlIndex === -1) return null;
+    localPath = cells[urlIndex].slice('local:'.length).trim();
+  }
+  const [company = '', title = ''] = cells.slice(urlIndex + 1);
+  // The note cell, not the whole line. The route marker is looked for in a note
+  // somebody wrote; searching the line would find it in the company cell, the
+  // title, the URL and the jd: filename as well, which is a route decided by a
+  // coincidence of spelling.
+  const noteCell = cells.find(cell => /^note:/i.test(cell)) || '';
+  const note = noteCell ? noteCell.slice(noteCell.indexOf(':') + 1).trim() : '';
+  return { url, company, title, localPath, note };
 }
 
 // postedAt arrives as epoch ms (or absent). Convert to 'YYYY-MM-DD', or '' when missing.
@@ -2359,29 +2872,83 @@ export function formatReadSummary(tally, { firecrawlEnabled = false } = {}) {
 }
 
 /**
- * The standalone pass: `node scan.mjs --read-pipeline`.
+ * Mark a pending line processed without losing anything it carried.
+ *
+ * The queue's older pre-screen shape (`- [x] #-- | <url> | skipped (…)`) throws
+ * the company and title cells away and buries them inside the reason, and that
+ * is precisely why the Anthropic Applied AI Strategist came back: a line with no
+ * readable pair seeds no dedup key, so the re-listing looked new. This keeps the
+ * whole entry, ticks the box and appends the reason, so the pair, the URL and
+ * the stored advert all survive the move.
+ */
+export function markPipelineLineProcessed(line, reason) {
+  const ticked = String(line).replace(/^(\s*- \[)[ ]?(\])/, '$1x$2');
+  return reason ? `${ticked.replace(/\s+$/, '')} | ${reason}` : ticked;
+}
+
+/** The reason written on a line the gate dropped. */
+export function formatGateDropReason(row, today = localToday()) {
+  const label = ADVERT_DROP_LABELS[row.reason] || row.reason || 'advert';
+  const phrase = row.phrase ? `: "${row.phrase}"` : '';
+  return `skipped (${label}${phrase}, ${today})`;
+}
+
+/**
+ * The standalone pass: `node scan.mjs --read-pipeline`, and with `--gate` the
+ * half that decides what each line costs.
  *
  * Walks the Pending section, reads every entry that carries no `jd:` segment
  * yet, and rewrites the line with one. It takes the same lock appendToPipeline
  * takes and reads no boards, so it is how the roles already queued get the same
  * treatment as tomorrow's scan.
  *
- * B1 rewrites lines and nothing else. Moving a drop to Processed with its
- * reason arrives with `--gate` in B2.
+ * With `gate` supplied (`--gate`), each pending line also:
+ *
+ *   1. is checked against the tracker first, on the posting URL and on company
+ *      plus title, and moved to Processed as a duplicate before anything is
+ *      read, routed or dropped;
+ *   2. meets the three advert filters on its stored text, and moves to
+ *      Processed with the phrase that dropped it when one bites;
+ *   3. is labelled `route: score` or `route: standard`, including a line that
+ *      was already read on an earlier day and is not read again.
+ *
+ * A row whose stored status is not `read` is never dropped on its advert.
  *
  * `readEntry` is injected so the whole pass is testable against a temporary
  * file with no network and no store.
  *
- * @param {{pipelinePath?: string, readEntry: Function}} options
- * @returns {Promise<{read:number, unreadable:number, expired:number, skipped:number, firecrawlResidue:number, unreadableRows:Array<object>}>}
+ * @param {object} options
+ * @returns {Promise<object>} Counters and the rows behind them.
  */
 export async function readPipelineAdverts({
   pipelinePath = PIPELINE_PATH,
   readEntry,
   reread = false,
   storedStatus = (relPath) => advertStatusAt(relPath, { jdsDir: JDS_DIR }),
+  storedText = (relPath) => loadAdvertText(relPath, { jdsDir: JDS_DIR }),
+  gate = null,
+  tiersTable = null,
+  trackerIndex = null,
+  // The same canonicaliser the sweep dedups with. Without it a tracker row
+  // filed under one spelling and a queue line under its configured alias never
+  // match, which is exactly the duplicate this check exists to catch.
+  canonicalizeCompany = defaultCompanyNormalizer,
+  titleFilterConfig = null,
+  today = localToday(),
 } = {}) {
-  const counts = { read: 0, unreadable: 0, expired: 0, skipped: 0, firecrawlResidue: 0, unreadableRows: [] };
+  const counts = {
+    read: 0,
+    unreadable: 0,
+    expired: 0,
+    skipped: 0,
+    firecrawlResidue: 0,
+    unreadableRows: [],
+    routed: emptyRouteTally(),
+    drops: emptyAdvertDropTally(),
+    duplicates: 0,
+    duplicateRows: [],
+    moved: 0,
+  };
   if (typeof readEntry !== 'function') throw new Error('readPipelineAdverts: readEntry is required');
   if (!existsSync(pipelinePath)) return counts;
 
@@ -2394,43 +2961,139 @@ export async function readPipelineAdverts({
       if (lines[i].startsWith('## ')) { endIdx = i; break; }
     }
 
+    // Lines the gate takes out of Pending, moved after the walk so the indices
+    // stay stable while it runs.
+    const movedOut = new Set();
+    const movedLines = [];
+
     for (let i = startIdx + 1; i < endIdx; i++) {
       const line = lines[i];
       const entry = pipelineEntry(line, PIPELINE_CHECKBOX_RE);
       // A struck-out entry is the pipeline's record of a dead posting; there is
       // nothing left to read.
       if (!entry || entry.expired) continue;
-      // A line already carrying a jd: has been read. Under --reread, read it
-      // again when the stored advert was never actually read — those lines are
-      // the only ones the flag exists for, so skipping them unconditionally made
-      // it a no-op. A file the apify plugin wrote reads as `read` and is left
-      // alone, so a paid advert is never replaced by a free re-fetch.
-      const storedPath = extractJdSegment(line);
-      if (storedPath && !(reread && storedStatus(storedPath) !== 'read')) {
+      // An entry already ticked has been dealt with; the Pending section can
+      // carry one when a mode moved the state without moving the line.
+      if (!/^\s*- \[ \]/.test(line)) continue;
+
+      const identity = pipelineLineIdentity(line) || { url: '', company: '', title: '' };
+
+      // ── 1. The tracker, before any route or drop ──────────────────
+      // A role already tracked is not queued again, whether it comes back under
+      // the same link or under another board's link and a slightly different
+      // title. Checked before the read, so a duplicate costs no fetch either.
+      if (gate && trackerIndex) {
+        const duplicate = matchTrackerDuplicate(identity, trackerIndex, canonicalizeCompany);
+        if (duplicate) {
+          counts.duplicates++;
+          counts.duplicateRows.push({ ...identity, ...duplicate });
+          movedOut.add(i);
+          movedLines.push(markPipelineLineProcessed(line, formatTrackerDuplicateReason(duplicate)));
+          continue;
+        }
+      }
+
+      // ── 2. The read ───────────────────────────────────────────────
+      // A line the apify plugin wrote carries its advert in the URL cell rather
+      // than a `jd:` segment. Without this it has no advert, no filter and no
+      // route at all, which is three lines of today's queue passing the gate
+      // untouched.
+      const storedPath = extractJdSegment(line) || identity.localPath || '';
+      const alreadyRead = Boolean(storedPath) && !(reread && storedStatus(storedPath) !== 'read');
+      let workingLine = line;
+      let readStatus = null;
+      let text = '';
+      let jdPath = storedPath || '';
+
+      if (alreadyRead) {
+        // B1 stopped here. With the gate on, a line read on an earlier day
+        // still has to be filtered and routed, so its stored text is loaded
+        // rather than re-fetched.
         counts.skipped++;
+        if (!gate) continue;
+        readStatus = storedStatus(storedPath);
+        if (readStatus === 'read') {
+          try {
+            text = storedText(storedPath) || '';
+          } catch {
+            text = '';
+          }
+        }
+      } else {
+        const url = identity.url;
+        if (!url) continue;
+        let outcome = null;
+        try {
+          outcome = await readEntry({ url, company: identity.company, title: identity.title, line });
+        } catch (err) {
+          // Per row, never per run.
+          outcome = { status: 'unreadable', rung: null, jdPath: null, failedAs: 'blocked', failedAt: 'reader', reachedFirecrawl: true, error: err?.message };
+        }
+        if (!outcome) continue;
+
+        if (outcome.jdPath) {
+          jdPath = outcome.jdPath;
+          workingLine = insertJdSegment(workingLine, outcome.jdPath);
+        }
+        if (outcome.reachedFirecrawl) counts.firecrawlResidue++;
+        readStatus = outcome.status;
+        text = outcome.status === 'read' ? (outcome.text || '') : '';
+        if (outcome.status === 'read') counts.read++;
+        else if (outcome.status === 'expired') counts.expired++;
+        else {
+          counts.unreadable++;
+          counts.unreadableRows.push({ url, company: identity.company, title: identity.title, failedAs: outcome.failedAs, failedAt: outcome.failedAt });
+        }
+      }
+
+      if (!gate) {
+        lines[i] = workingLine;
         continue;
       }
-      const url = extractPipelineUrl(line);
-      if (!url) continue;
-      const pair = extractPipelineCompanyRole(line) || { company: '', role: '' };
 
-      let outcome = null;
-      try {
-        outcome = await readEntry({ url, company: pair.company, title: pair.role, line });
-      } catch (err) {
-        // Per row, never per run.
-        outcome = { status: 'unreadable', rung: null, jdPath: null, failedAs: 'blocked', failedAt: 'reader', reachedFirecrawl: true, error: err?.message };
+      // ── 3. The three advert filters ───────────────────────────────
+      const verdict = gate({
+        description: text,
+        matchedKeywords: matchedTitleKeywords(identity.title, titleFilterConfig),
+        readStatus,
+      });
+      if (verdict.drop) {
+        const row = {
+          company: identity.company,
+          title: identity.title,
+          url: identity.url,
+          jdPath,
+          reason: verdict.reason,
+          phrase: verdict.phrase,
+        };
+        countAdvertDrop(counts.drops, row);
+        movedOut.add(i);
+        movedLines.push(markPipelineLineProcessed(workingLine, formatGateDropReason(row, today)));
+        continue;
       }
-      if (!outcome) continue;
 
-      if (outcome.jdPath) lines[i] = insertJdSegment(line, outcome.jdPath);
-      if (outcome.reachedFirecrawl) counts.firecrawlResidue++;
-      if (outcome.status === 'read') counts.read++;
-      else if (outcome.status === 'expired') counts.expired++;
-      else {
-        counts.unreadable++;
-        counts.unreadableRows.push({ url, company: pair.company, title: pair.role, failedAs: outcome.failedAs, failedAt: outcome.failedAt });
+      // ── 4. The route ──────────────────────────────────────────────
+      const routing = routeDetail(identity.company, tiersTable, identity.note);
+      countRoute(counts.routed, routing);
+      lines[i] = insertRouteSegment(workingLine, routing.route);
+    }
+
+    if (movedOut.size > 0) {
+      counts.moved = movedOut.size;
+      const kept = lines.filter((_, idx) => !movedOut.has(idx));
+      const procIdx = kept.findIndex(l => PROCESSED_MARKERS.some(m => l.trim() === m));
+      if (procIdx === -1) {
+        kept.push('', '## Processed', '', ...movedLines);
+      } else {
+        let insertAt = kept.length;
+        for (let i = procIdx + 1; i < kept.length; i++) {
+          if (kept[i].startsWith('## ')) { insertAt = i; break; }
+        }
+        while (insertAt > procIdx + 1 && kept[insertAt - 1].trim() === '') insertAt--;
+        kept.splice(insertAt, 0, ...movedLines);
       }
+      atomicWriteFile(pipelinePath, kept.join('\n'));
+      return;
     }
 
     atomicWriteFile(pipelinePath, lines.join('\n'));
@@ -3077,7 +3740,7 @@ const KNOWN_FLAGS = [
   '--dry-run', '--verify', '--headed-fallback', '--throttle', '--rediscover-404',
   '--include-blacklisted', '--company', '--posted-after', '--posted-before',
   '--since', '--quiet', '--json', '--help', '-h', '--source-log',
-  '--read-pipeline', '--reread',
+  '--read-pipeline', '--reread', '--gate',
 ];
 
 // Flags whose space-separated value is the NEXT argv token (the `--flag=value`
@@ -3102,6 +3765,7 @@ const USAGE = `Usage:
   node scan.mjs --source-log <path>          # write the per-source rows here instead of data/scan-sources.tsv
   node scan.mjs --read-pipeline              # read the adverts of the rows already queued, and label them
   node scan.mjs --reread                     # re-read a stored advert that was not read the first time
+  node scan.mjs --read-pipeline --gate       # also filter, dedup against the tracker, and label each row's route
   node scan.mjs --json                       # emit one machine-readable receipt on stdout
   node scan.mjs --quiet                      # suppress the manifesto footer
   node scan.mjs --help                       # print this usage block and exit`;
@@ -3226,9 +3890,31 @@ async function main() {
   // Stelios's button, from a terminal.
   if (args.includes('--read-pipeline')) {
     const reader = buildAdvertReader({ config, reread: args.includes('--reread') });
+    // --gate (ticket B2) adds the three advert filters, the tracker dedup and
+    // the route label to the same pass. Without it the pass only reads and
+    // labels with jd:, exactly as B1 shipped it.
+    const gating = args.includes('--gate');
+    const candidateCountryForGate = gating ? loadCandidateCountry() : '';
+    const canonicalizeCompanyForGate = buildCompanyCanonicalizer(config.company_aliases);
+    const gate = gating
+      ? buildAdvertGate({
+        contentFilter: buildContentFilter(config.content_filter),
+        countryEligibilityFilter: buildCountryEligibilityFilter(config.country_eligibility_filter, candidateCountryForGate),
+        visaFilter: buildVisaFilter(config.visa_filter),
+        explain: buildDropExplainer(config, candidateCountryForGate),
+      })
+      : null;
     console.log(`Reading the adverts of the rows already queued in ${PIPELINE_PATH} …`);
+    if (gating) console.log(`Gating against ${APPLICATIONS_PATH} and ${TIERS_PATH}, both read-only.`);
     const counts = await readPipelineAdverts({
       reread: args.includes('--reread'),
+      gate,
+      tiersTable: gating ? loadTiersTable(TIERS_PATH) : null,
+      trackerIndex: gating
+        ? loadTrackerDedupIndex({ trackerPath: APPLICATIONS_PATH, canonicalize: canonicalizeCompanyForGate })
+        : null,
+      canonicalizeCompany: canonicalizeCompanyForGate,
+      titleFilterConfig: config.title_filter,
       readEntry: async (entry) => {
         const outcome = await reader.read(entry);
         console.log(`  ${outcome.status === 'read' ? '✅' : '⚠️ '} ${outcome.status.padEnd(11)} ${entry.company || '?'} | ${entry.title || '?'}`);
@@ -3240,6 +3926,20 @@ async function main() {
       console.log(line);
     }
     console.log(`Already labelled:      ${counts.skipped} ${counts.skipped === 1 ? 'row' : 'rows'} skipped`);
+    if (gating) {
+      if (counts.duplicates > 0) {
+        console.log(`Already tracked:       ${counts.duplicates} moved to Processed`);
+      }
+      for (const line of formatGateSummary(counts.drops, counts.routed)) {
+        console.log(line);
+      }
+      for (const row of counts.duplicateRows) {
+        console.log(`DUPE | ${row.company || '?'} | ${row.title || '?'} | tracker row ${row.row} (${row.key}) | ${row.url || row.company}`);
+      }
+      for (const row of counts.drops.rows) {
+        console.log(formatAdvertDropRow(row));
+      }
+    }
     for (const row of reader.tally.unreadableRows) {
       console.log(formatUnreadableRow(row));
     }
@@ -3276,6 +3976,19 @@ async function main() {
   // Ticket B1: the reader that fills job.description before the three filters
   // above can read it. Built here so one tally serves the whole run.
   const advertReader = buildAdvertReader({ config, reread: args.includes('--reread') });
+  // Ticket B2: the gate the filled description meets, the drop tally that names
+  // each drop, the tier table and the route tally. The tier table is
+  // data/companies.tsv, the Tiers chat's file: read, never written, and a
+  // company it does not name is untiered rather than an error.
+  const advertGate = buildAdvertGate({
+    contentFilter,
+    countryEligibilityFilter,
+    visaFilter,
+    explain: buildDropExplainer(config, candidateCountry),
+  });
+  const advertDrops = emptyAdvertDropTally();
+  const tiersTable = loadTiersTable(TIERS_PATH);
+  const routeTally = emptyRouteTally();
   const visaEnabled = Boolean(config.visa_filter) && config.visa_filter.enabled !== false;
 
   // 3. Resolve a provider for each enabled company / board
@@ -3558,19 +4271,29 @@ async function main() {
           }
           if (outcome.status === 'read' && outcome.text) job.description = outcome.text;
         }
-        if (!contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
-          totalFilteredContent++;
-          sourceLedger.drop(company.name, 'content');
-          continue;
-        }
-        if (!countryEligibilityFilter(job.description)) {
-          totalFilteredCountryEligibility++;
-          sourceLedger.drop(company.name, 'countryEligibility');
-          continue;
-        }
-        if (!visaFilter(job.description)) {
-          totalFilteredVisa++;
-          sourceLedger.drop(company.name, 'visa');
+        // ── The gate (ticket B2) ─────────────────────────────────
+        // One rule, shared with the standalone pass, so the two cannot drift.
+        // A row whose read status is anything but `read` is kept, labelled and
+        // listed: nothing is dropped on an advert nobody read. A drop is named
+        // with the phrase that dropped it and the stored file it was read from.
+        const verdict = advertGate({
+          description: job.description,
+          matchedKeywords: matchedTitleKeywords(job.title, config.title_filter),
+          readStatus: job.readStatus ?? null,
+        });
+        if (verdict.drop) {
+          if (verdict.reason === 'content') totalFilteredContent++;
+          else if (verdict.reason === 'countryEligibility') totalFilteredCountryEligibility++;
+          else if (verdict.reason === 'visa') totalFilteredVisa++;
+          sourceLedger.drop(company.name, verdict.reason);
+          countAdvertDrop(advertDrops, {
+            company: job.company || company.name || '',
+            title: job.title,
+            url: job.url,
+            jdPath: job.jdPath || '',
+            reason: verdict.reason,
+            phrase: verdict.phrase,
+          });
           continue;
         }
         const dedupUrl = normalizeUrlForDedup(job.url);
@@ -3602,6 +4325,12 @@ async function main() {
         // rediscovery fallback. A null domain (no careers_url) marks the offer
         // as broad-discovery — ineligible for the fallback, per the issue scope.
         const careersUrlDomain = extractCareersUrlDomain(company.careers_url);
+        // The route, decided before any evaluation token is spent. It rides the
+        // queue line as `route: score` or `route: standard`; it never decides
+        // whether the advert is read, which is free and has already happened.
+        const routing = routeDetail(job.company || company.name || '', tiersTable, job.note || '');
+        countRoute(routeTally, routing);
+        job.route = routing.route;
         sourceLedger.keep(company.name);
         // --verify drops postings after the sweep has finished, by which
         // time the entry that produced them is out of scope. The URL is what
@@ -3808,6 +4537,22 @@ async function main() {
     }
     for (const row of advertReader.tally.unreadableRows) {
       console.log(formatUnreadableRow(row));
+    }
+  }
+  // The two lines B2 adds under B1's three, and the drops they count. Printed
+  // outside the read block on purpose: a row dropped on a description its board
+  // handed over was still dropped on the advert, and every queued row is routed
+  // whether or not the reader was asked for anything. formatGateSummary returns
+  // nothing when there is nothing to say, so a run with neither stays
+  // byte-identical.
+  {
+    const gateLines = formatGateSummary(advertDrops, routeTally);
+    if (gateLines.length > 0 && advertReader.tally.considered === 0) console.log('');
+    for (const line of gateLines) console.log(line);
+    // One line per drop, naming the phrase that dropped it and the stored
+    // advert it was read from.
+    for (const row of advertDrops.rows) {
+      console.log(formatAdvertDropRow(row));
     }
   }
   if (blacklist.size > 0) {
