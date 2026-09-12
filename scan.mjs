@@ -85,6 +85,7 @@ import {
   ROUTE_BUCKETS,
   ROUTE_BUCKET_LABELS,
 } from './providers/_role-route.mjs';
+import { extractExperienceClauses } from './providers/_experience-clause.mjs';
 import { flagValue, hasFlag, validateFlags } from './lib/cli-flags.mjs';
 import { withPortalHealthLock } from './portal-health-lock.mjs';
 import { localToday } from './lib/local-today.mjs';
@@ -2092,6 +2093,49 @@ export function formatTrackerDuplicateReason(match) {
 // spent.
 
 /**
+ * The years policy, from the 12 September decision table in
+ * `projects/career/General Role Criteria v1.md`.
+ *
+ * Five or more is out, which is the floor set on 3 September and unchanged.
+ * Four is a long shot: the scan keeps it and labels the row, and triage decides
+ * — that is where the work-sample question lives. Three or fewer is scored
+ * normally.
+ *
+ * The numbers are here rather than in portals.yml on purpose. A phrase list
+ * cannot tell a bar from a wish, which is the whole of finding F01, and the
+ * eighty-odd phrases that list carried came out in the same change.
+ */
+export const YEARS_FLOOR = 5;
+export const YEARS_STRETCH = 4;
+
+/**
+ * What the advert's years clauses cost this row.
+ *
+ * A clause binds him only when it is about the reader (`subject !== 'company'`)
+ * and the advert does not call it a preference (`mandatory !== false`). An
+ * unknown subject and an unstated mandatory both bind: a bare requirements list
+ * is the ordinary shape, and reading it as optional would keep everything.
+ *
+ * @param {string} text - the advert, as stored.
+ * @param {(text: string) => Array<object>} [extract] - the reader, injectable
+ *   so the rule can be tested without one and so a policy change has one home.
+ * @returns {{drop: boolean, sentence?: string, years?: number}} `sentence` on a
+ *   drop, `years` when the row is kept as a long shot.
+ */
+export function judgeExperienceYears(text, extract = extractExperienceClauses) {
+  const binding = extract(text).filter(c => c && c.subject !== 'company' && c.mandatory !== false);
+  let worst = null;
+  for (const clause of binding) {
+    if (!Number.isFinite(clause.minimum)) continue;
+    if (!worst || clause.minimum > worst.minimum) worst = clause;
+  }
+  if (!worst) return { drop: false };
+  if (worst.minimum >= YEARS_FLOOR) return { drop: true, sentence: worst.sentence };
+  if (worst.minimum >= YEARS_STRETCH) return { drop: false, years: worst.minimum };
+  return { drop: false };
+}
+
+/**
  * Why a row was dropped, in the words of the filter that dropped it.
  *
  * The filters themselves return a bare boolean, and rebuilding their decision
@@ -2167,10 +2211,11 @@ export function buildDropExplainer(config = {}, candidateCountry = '') {
 }
 
 /** The three drop reasons the gate can return, in the order it tries them. */
-export const ADVERT_DROP_REASONS = ['content', 'countryEligibility', 'visa'];
+export const ADVERT_DROP_REASONS = ['content', 'years', 'countryEligibility', 'visa'];
 
 export const ADVERT_DROP_LABELS = {
   content: 'content',
+  years: 'years',
   countryEligibility: 'eligibility',
   visa: 'visa',
 };
@@ -2186,17 +2231,25 @@ export const ADVERT_DROP_LABELS = {
  *
  * @returns {{drop: boolean, reason?: string, phrase?: string, unread?: boolean}}
  */
-export function buildAdvertGate({ contentFilter, countryEligibilityFilter, visaFilter, explain }) {
+export function buildAdvertGate({ contentFilter, countryEligibilityFilter, visaFilter, explain, experienceClauses }) {
   const pass = () => true;
   const content = contentFilter || pass;
   const eligibility = countryEligibilityFilter || pass;
   const visa = visaFilter || pass;
   const why = explain || (() => '');
+  const clauses = experienceClauses || extractExperienceClauses;
 
   return function gate({ description = '', matchedKeywords = [], readStatus = null } = {}) {
     if (readStatus != null && readStatus !== 'read') return { drop: false, unread: true };
     if (!content(description, matchedKeywords)) {
       return { drop: true, reason: 'content', phrase: why('content', description, matchedKeywords) };
+    }
+    // The years rule (ticket C, C1). Its own reason, so the DROP line quotes
+    // the sentence rather than naming a phrase from a list that no longer
+    // carries one. A kept row with a four-year bar comes back labelled.
+    const years = judgeExperienceYears(description, clauses);
+    if (years.drop) {
+      return { drop: true, reason: 'years', phrase: years.sentence };
     }
     if (!eligibility(description)) {
       return { drop: true, reason: 'countryEligibility', phrase: why('countryEligibility', description) };
@@ -2204,7 +2257,7 @@ export function buildAdvertGate({ contentFilter, countryEligibilityFilter, visaF
     if (!visa(description)) {
       return { drop: true, reason: 'visa', phrase: why('visa', description) };
     }
-    return { drop: false };
+    return years.years ? { drop: false, years: years.years } : { drop: false };
   };
 }
 
@@ -2393,6 +2446,12 @@ export function formatPipelineOffer(offer) {
   // triage to read it. An offer with no stored advert produces no segment.
   const jd = typeof offer.jdPath === 'string' ? offer.jdPath.trim() : '';
   if (jd) line = `${line} | jd: ${sanitizeMarkdownField(`local:${jd}`)}`;
+  // Labeled long-shot segment (ticket C, C1) — a years bar of four is kept and
+  // said out loud, so triage can see the stretch without re-reading the advert.
+  // Ordered after jd: and before route:, so the serialization is stable however
+  // the row reached the queue. A row below the stretch produces no segment.
+  const years = yearsSegmentValue(offer.years);
+  if (years != null) line = `${line} | years: ${years}`;
   // Labeled route segment (ticket B2) — which effort this row gets, decided
   // before any evaluation token is spent. Ordered after jd:, before note:, for
   // a stable serialization. An offer with no route produces no segment, so a
@@ -2433,6 +2492,45 @@ export function insertJdSegment(line, relPath) {
   return `${line.slice(0, noteAt)}${segment} ${line.slice(noteAt)}`;
 }
 
+
+// The long-shot segment on an existing queue line, e.g. `| years: 4`.
+const YEARS_SEGMENT_RE = /\|\s*years:\s*(\d{1,2})\b/i;
+
+/** A whole number of years, or null for anything that is not one. */
+function yearsSegmentValue(value) {
+  const n = typeof value === 'number' ? value : Number.parseInt(String(value ?? ''), 10);
+  return Number.isInteger(n) && n > 0 && n < 100 ? n : null;
+}
+
+/** The long-shot years a queue line already carries, or null. */
+export function extractYearsSegment(line) {
+  const m = String(line).match(YEARS_SEGMENT_RE);
+  return m ? Number.parseInt(m[1], 10) : null;
+}
+
+/**
+ * Add, replace or remove the segment on a queue line.
+ *
+ * Like `insertRouteSegment` this one overwrites, and for the same reason: the
+ * rule that wrote it can change, and a re-run must be able to correct a label
+ * it wrote last week. A null removes it, so a row the reader has since read
+ * properly stops claiming a bar the advert does not carry.
+ */
+export function insertYearsSegment(line, years) {
+  const value = yearsSegmentValue(years);
+  const text = String(line);
+  if (extractYearsSegment(text) != null) {
+    if (value == null) return text.replace(YEARS_SEGMENT_RE, '').replace(/\s{2,}/g, ' ').replace(/\s+$/, '');
+    return text.replace(YEARS_SEGMENT_RE, `| years: ${value}`);
+  }
+  if (value == null) return text;
+  const segment = `| years: ${value}`;
+  for (const before of ['| route:', '| note:']) {
+    const at = text.indexOf(before);
+    if (at !== -1) return `${text.slice(0, at)}${segment} ${text.slice(at)}`;
+  }
+  return `${text.replace(/\s+$/, '')} ${segment}`;
+}
 
 // The route segment on an existing queue line, e.g. `| route: score`. Read and
 // written by the standalone pass, which labels lines the scan wrote on an
@@ -2886,10 +2984,16 @@ export function markPipelineLineProcessed(line, reason) {
   return reason ? `${ticked.replace(/\s+$/, '')} | ${reason}` : ticked;
 }
 
-/** The reason written on a line the gate dropped. */
+/**
+ * The reason written on a line the gate dropped.
+ *
+ * The phrase is sanitized because it is no longer always a configured keyword:
+ * a years drop quotes the advert's own sentence, and a pipe inside it would add
+ * a cell to the queue line that every positional reader would then miscount.
+ */
 export function formatGateDropReason(row, today = localToday()) {
   const label = ADVERT_DROP_LABELS[row.reason] || row.reason || 'advert';
-  const phrase = row.phrase ? `: "${row.phrase}"` : '';
+  const phrase = row.phrase ? `: "${sanitizeMarkdownField(row.phrase)}"` : '';
   return `skipped (${label}${phrase}, ${today})`;
 }
 
@@ -3072,7 +3176,11 @@ export async function readPipelineAdverts({
         continue;
       }
 
-      // ── 4. The route ──────────────────────────────────────────────
+      // ── 4. The long shot, then the route ──────────────────────────
+      // Only for a row this pass actually read: an unread advert has no verdict
+      // to write, and clearing a label the reader wrote on a better day would
+      // lose the only thing the queue knows about its years bar.
+      if (!verdict.unread) workingLine = insertYearsSegment(workingLine, verdict.years ?? null);
       const routing = routeDetail(identity.company, tiersTable, identity.note);
       countRoute(counts.routed, routing);
       lines[i] = insertRouteSegment(workingLine, routing.route);
@@ -4282,10 +4390,15 @@ async function main() {
           readStatus: job.readStatus ?? null,
         });
         if (verdict.drop) {
-          if (verdict.reason === 'content') totalFilteredContent++;
-          else if (verdict.reason === 'countryEligibility') totalFilteredCountryEligibility++;
-          else if (verdict.reason === 'visa') totalFilteredVisa++;
-          sourceLedger.drop(company.name, verdict.reason);
+          // A years drop counts as a content drop in the per-source ledger and
+          // the run summary: both read the advert's text, and the ledger's keys
+          // are a column in data/scan-sources.tsv that other scripts parse.
+          // The DROP line and the gate summary name it as `years` on its own.
+          const ledgerReason = verdict.reason === 'years' ? 'content' : verdict.reason;
+          if (ledgerReason === 'content') totalFilteredContent++;
+          else if (ledgerReason === 'countryEligibility') totalFilteredCountryEligibility++;
+          else if (ledgerReason === 'visa') totalFilteredVisa++;
+          sourceLedger.drop(company.name, ledgerReason);
           countAdvertDrop(advertDrops, {
             company: job.company || company.name || '',
             title: job.title,
@@ -4296,6 +4409,7 @@ async function main() {
           });
           continue;
         }
+        if (verdict.years) job.years = verdict.years;
         const dedupUrl = normalizeUrlForDedup(job.url);
         if (seenUrls.has(dedupUrl)) {
           totalDupes++;

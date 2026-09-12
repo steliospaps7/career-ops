@@ -29,6 +29,7 @@ import {
   ADVERT_DROP_REASONS,
   ADVERT_DROP_LABELS,
   formatAdvertDropRow,
+  formatGateDropReason,
   formatGateSummary,
   emptyAdvertDropTally,
   countAdvertDrop,
@@ -290,4 +291,20 @@ const gate = makeGate();
 {
   const noted = '- [ ] https://example.com/jobs/5 | Acme | PM | note: x';
   eq('with a note but no route, the segment goes before the note', insertYearsSegment(noted, 4), '- [ ] https://example.com/jobs/5 | Acme | PM | years: 4 | note: x');
+}
+
+// ── 8. The reason written into the queue file ────────────────────────
+// The dropped line goes to Processed carrying its reason. A years phrase is
+// the advert's own sentence rather than a configured keyword, so a pipe or a
+// bracket inside it would add a cell every positional reader miscounts.
+
+{
+  const reason = formatGateDropReason({
+    reason: 'years',
+    phrase: 'You must have 5+ years | of [product] experience.',
+  }, '2026-09-12');
+  ok('the years label reaches the Processed line', reason.startsWith('skipped (years: "'));
+  ok('a pipe in the advert does not become a cell', !reason.includes('|'));
+  ok('and a bracket is escaped', reason.includes('\\[product\\]'));
+  ok('the date is still there', reason.endsWith(', 2026-09-12)'));
 }
