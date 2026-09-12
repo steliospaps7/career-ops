@@ -14,7 +14,7 @@ import {
   routeByTier,
   routeDetail,
   canonicalTierName,
-  noteCarriesFlag,
+  noteCarriesRouteMarker,
 } from '../providers/_role-route.mjs';
 import { pass, fail } from './helpers.mjs';
 
@@ -39,7 +39,14 @@ const TSV = [
   'Sift\tsift\t120\tSoftware\tLondon\thttps://sift.com\t\tno\tnone\tnew\tPayments risk\t3',
   '  Wide   Load  \twide\t12\tSoftware\tLondon\thttps://wide.com\t\tno\tnone\tnew\tSpacing test\t2',
   'Anthropic\tanthropic\t1200\tAI\tSan Francisco\thttps://anthropic.com\t\tyes\tnone\tnew\tWish list\tdream',
+  // The real Zego row, verbatim from data/companies.tsv. The word "flag" in an
+  // ordinary note must route nothing; before the build review it routed this
+  // company, marked `out`, to scoring.
   'Zego\tzego\t348\tInsurance\tLondon\thttps://zego.com\t\tno\tnone\tout\tToo big; the size was already the flag\tout',
+  // A Siyada clause 13.1 note, the shape nine real rows carry.
+  'Heights\theights\t40\tConsumer\tLondon\thttps://heights.com\t\tyes\tnone\tnew\tSiyada clause 13.1 flag: a supplement brand\t3',
+  // The marker a human writes when they mean it.
+  'Marked Co\tmarked\t20\tSoftware\tLondon\thttps://marked.com\t\tno\tnone\tnew\troute: score — worth the full evaluation\t3',
   'Blank Tier\tblank\t20\tSoftware\tLondon\thttps://blank.com\t\tno\tnone\tnew\tNo tier yet\t',
   'Quiet Co\tquiet\t20\tSoftware\tLondon\thttps://quiet.com\t\tno\tnone\tnew\tNothing special\t3',
 ].join('\n');
@@ -48,7 +55,7 @@ const tiers = parseTiersTable(TSV);
 
 // ── The table itself ────────────────────────────────────────────────
 {
-  eq('every named row is in the table', tiers.size, 8);
+  eq('every named row is in the table', tiers.size, 10);
   eq('the tier column is read by header, not by position', tiers.get('lupa')?.tier, '1');
   eq('the notes column is read by header too', tiers.get('sift')?.notes, 'Payments risk');
   ok('a header-only file yields an empty table', parseTiersTable('name\ttier').size === 0);
@@ -86,18 +93,31 @@ const tiers = parseTiersTable(TSV);
   eq('a dream company is bucketed as dream', routeDetail('Anthropic', tiers).bucket, 'dream');
 }
 
-// ── `flag` beats the tier ───────────────────────────────────────────
+// ── The `route: score` marker beats the tier ────────────────────────
+//
+// The marker is a literal that no ordinary note writes by chance. It was the
+// bare word "flag" until the build review of 11 September 2026, and every
+// occurrence of that word in the real tier table is a Siyada clause 13.1
+// compliance note rather than a routing instruction.
 {
-  eq('flag in the queue line note scores over tier 3', routeByTier('Quiet Co', tiers, 'flag: worth a look'), 'score');
-  eq('flag in the line note is bucketed as flagged', routeDetail('Quiet Co', tiers, 'flag this one').bucket, 'flagged');
-  eq('flag in the company notes scores over a tier that would not', routeByTier('Zego', tiers), 'score');
-  eq('flagged counts as the same word', routeByTier('Quiet Co', tiers, 'flagged by me'), 'score');
-  eq('flagship does not', routeByTier('Quiet Co', tiers, 'their flagship product'), 'standard');
-  ok('noteCarriesFlag reads the bare word', noteCarriesFlag('flag'));
-  ok('noteCarriesFlag ignores a word that merely starts with it', !noteCarriesFlag('flagpole'));
-  ok('noteCarriesFlag on nothing is false', !noteCarriesFlag(undefined));
+  eq('the marker in the queue line note scores over tier 3', routeByTier('Quiet Co', tiers, 'route: score, worth a look'), 'score');
+  eq('the marker in the line note is bucketed as flagged', routeDetail('Quiet Co', tiers, 'route: score').bucket, 'flagged');
+  eq('the marker in the company notes scores over a tier that would not', routeByTier('Marked Co', tiers), 'score');
+  eq('case and spacing do not matter', routeByTier('Quiet Co', tiers, 'ROUTE:   SCORE'), 'score');
+
+  // The word that used to route, and no longer does.
+  eq('the bare word flag routes nothing', routeByTier('Quiet Co', tiers, 'flag this one'), 'standard');
+  eq('nor does "flagged"', routeByTier('Quiet Co', tiers, 'flagged by me'), 'standard');
+  eq('a Siyada compliance note routes nothing', routeByTier('Heights', tiers), 'standard');
+  eq('and neither does the real Zego note, on a company marked out', routeByTier('Zego', tiers), 'standard');
+  eq('nor does flagship', routeByTier('Quiet Co', tiers, 'their flagship product'), 'standard');
+
+  ok('noteCarriesRouteMarker reads the literal', noteCarriesRouteMarker('route: score'));
+  ok('noteCarriesRouteMarker refuses the other route', !noteCarriesRouteMarker('route: standard'));
+  ok('noteCarriesRouteMarker refuses a longer word', !noteCarriesRouteMarker('route: scorecard'));
+  ok('noteCarriesRouteMarker on nothing is false', !noteCarriesRouteMarker(undefined));
   // A tier that already scores keeps its own bucket, so no row is counted twice.
-  eq('a flagged tier 1 is still counted as tier 1', routeDetail('Lupa', tiers, 'flag').bucket, 'tier1');
+  eq('a marked tier 1 is still counted as tier 1', routeDetail('Lupa', tiers, 'route: score').bucket, 'tier1');
 }
 
 // ── Names match across case and whitespace, and nothing fuzzier ─────

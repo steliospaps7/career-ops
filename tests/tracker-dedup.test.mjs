@@ -220,4 +220,58 @@ function tracker(...rows) {
   );
 }
 
+// ── A region is kept in the key, in both spellings ──────────────────
+//
+// A city or a country after the title is how one company splits one req per
+// office, and collapsing those to one key is what the normalizer is for. A
+// region is not that: "Account Executive, EMEA" and "Account Executive,
+// Americas" are two jobs on two continents, and merging them loses the second
+// as a duplicate that never reaches the queue. So a region stays in the key —
+// which is also what makes the two spellings of the Anthropic title agree,
+// rather than both collapsing onto the bare title.
+{
+  ok(
+    'two regions at one company stay two keys',
+    normalizeRoleForDedup('Account Executive, EMEA') !== normalizeRoleForDedup('Account Executive, Americas'),
+  );
+  ok(
+    'and in the bracketed spelling too, which had the same flaw before this ticket',
+    normalizeRoleForDedup('Account Executive (EMEA)') !== normalizeRoleForDedup('Account Executive (Americas)'),
+  );
+  eq(
+    'a region is not stripped down to the bare title',
+    normalizeRoleForDedup('Account Executive (EMEA)'),
+    'account executive emea',
+  );
+  eq(
+    'the two spellings of a region still agree with each other',
+    normalizeRoleForDedup('Account Executive, EMEA'),
+    normalizeRoleForDedup('Account Executive (EMEA)'),
+  );
+  for (const region of ['APAC', 'Americas', 'Europe', 'EU', 'North America', 'Latin America', 'AMER']) {
+    ok(
+      `"${region}" is kept in the key`,
+      normalizeRoleForDedup(`Manager, ${region}`) !== normalizeRoleForDedup('Manager'),
+    );
+  }
+  // The city and country behaviour the upstream suite pins is unchanged.
+  eq('a city is still stripped', normalizeRoleForDedup('Engineer (Berlin)'), normalizeRoleForDedup('Engineer'));
+  eq('a country is still stripped', normalizeRoleForDedup('Engineer (Germany)'), normalizeRoleForDedup('Engineer'));
+  eq('a remote tag is still stripped', normalizeRoleForDedup('Engineer [Remote]'), normalizeRoleForDedup('Engineer'));
+}
+
+// ── A title that is nothing but its tag keys the tag, not '' ────────
+//
+// The empty key is the dangerous one: every title at that company that
+// normalizes to nothing shares it, and the first one queued buries the rest.
+{
+  eq('a bracketed tag alone keys the tag', normalizeRoleForDedup('(Remote)'), 'remote');
+  eq('a square-bracketed tag alone too', normalizeRoleForDedup('[Berlin]'), 'berlin');
+  eq('a bare region keys itself', normalizeRoleForDedup('EMEA'), 'emea');
+  ok(
+    'so two tag-only titles at one company do not share a key',
+    normalizeRoleForDedup('(Remote)') !== normalizeRoleForDedup('(Berlin)'),
+  );
+}
+
 for (const d of dirs) rmSync(d, { recursive: true, force: true });

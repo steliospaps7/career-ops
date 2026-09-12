@@ -180,12 +180,12 @@ const gate = makeGate();
     'One\t\t1',
     'Two\t\t2',
     'Three\t\t3',
-    'Flagged Co\tflag this one\t3',
+    'Marked Co\troute: score — worth the full evaluation\t3',
   ].join('\n'));
   const routes = emptyRouteTally();
   countRoute(routes, routeDetail('One', tiers));
   countRoute(routes, routeDetail('Two', tiers));
-  countRoute(routes, routeDetail('Flagged Co', tiers));
+  countRoute(routes, routeDetail('Marked Co', tiers));
   countRoute(routes, routeDetail('Three', tiers));
   countRoute(routes, routeDetail('Not In The Table', tiers));
 

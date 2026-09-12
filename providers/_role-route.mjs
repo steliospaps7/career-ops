@@ -30,16 +30,25 @@ export function canonicalTierName(name) {
 }
 
 /**
- * The word `flag` in a note, which routes a role to scoring whatever its tier.
+ * The marker that routes a role to scoring whatever its tier: the literal
+ * string `route: score`, in the queue line's note cell or the company's notes
+ * column.
  *
- * `flagged` counts as the same instruction: a note that says "flagged" and is
- * silently ignored is the kind of quiet miss this ticket exists to close.
- * `flagship` does not, hence the word boundary.
+ * It was the bare word `flag` until the build review of 11 September 2026.
+ * Every occurrence of that word in the real `data/companies.tsv` is a Siyada
+ * clause 13.1 compliance note — "Siyada clause 13.1 flag: a supplement brand" —
+ * and one of them, Zego, sits on a company marked `out` and read "the size was
+ * already the flag". A marker that collides with ordinary prose routes roles by
+ * accident, so the Planner's ruling is a literal that no note writes by
+ * chance. The word `flag` now routes nothing.
+ *
+ * Matched case-insensitively with flexible spacing after the colon, because it
+ * is typed by hand into a notes cell.
  */
-const FLAG_WORD_RE = /\bflag(?:ged)?\b/i;
+const ROUTE_MARKER_RE = /\broute:\s*score\b/i;
 
-export function noteCarriesFlag(note) {
-  return FLAG_WORD_RE.test(String(note ?? ''));
+export function noteCarriesRouteMarker(note) {
+  return ROUTE_MARKER_RE.test(String(note ?? ''));
 }
 
 /**
@@ -118,7 +127,7 @@ export function routeDetail(companyName, tiersTable, lineNote = '') {
   if (tier === '1') return { route: 'score', bucket: 'tier1', tier };
   if (tier === '2') return { route: 'score', bucket: 'tier2', tier };
   if (tier === 'dream') return { route: 'score', bucket: 'dream', tier };
-  if (noteCarriesFlag(lineNote) || noteCarriesFlag(entry?.notes)) {
+  if (noteCarriesRouteMarker(lineNote) || noteCarriesRouteMarker(entry?.notes)) {
     return { route: 'score', bucket: 'flagged', tier };
   }
   if (tier === '3') return { route: 'standard', bucket: 'tier3', tier };

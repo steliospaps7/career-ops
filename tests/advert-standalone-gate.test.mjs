@@ -20,6 +20,7 @@ import {
   buildDropExplainer,
   buildContentFilter,
   collectTrackerDedupIndex,
+  buildCompanyCanonicalizer,
   extractRouteSegment,
   extractJdSegment,
   markPipelineLineProcessed,
@@ -323,6 +324,94 @@ function readerFor(map) {
   ok('and moved with its reason', out.processed[0].includes('content: "5+ years"'));
   ok('the local: cell is left where it was', out.pending[0].includes('local:jds/kira-strategy-1111111111.md'));
   eq('neither was fetched', counts.read, 0);
+}
+
+// ── The route marker is read from the note cell, not from the line ──
+//
+// The two paths must apply the same rule. The sweep passes `job.note`; this
+// pass used to hand `routeDetail` the whole queue line, so the marker fired on
+// the company cell, the title, the URL and the jd: filename as well — a route
+// decided by a coincidence of spelling.
+{
+  const marked = parseTiersTable([
+    'name\tnotes\ttier',
+    'Quiet Co\tNothing special\t3',
+    'Route Score Ltd\tA company whose own name contains the marker\t3',
+  ].join('\n'));
+
+  const p = pipelineFile([
+    // The marker in the note cell: this one scores.
+    '- [ ] https://jobs.quiet.example/1 | Quiet Co | Analyst | London | note: route: score, worth the full read',
+    // The same words in the title cell: this one does not.
+    '- [ ] https://jobs.quiet.example/2 | Quiet Co | Route: score Analyst | London',
+    // The same words in the company name: nor this one.
+    '- [ ] https://jobs.quiet.example/3 | Route Score Ltd | Analyst | London',
+    // The same words in the URL and the stored filename: nor this one.
+    '- [ ] https://jobs.quiet.example/route-score-4 | Quiet Co | Analyst | London | jd: local:jds/route-score-9999999999.md',
+  ]);
+  await readPipelineAdverts({
+    pipelinePath: p,
+    gate,
+    tiersTable: marked,
+    storedStatus: () => 'read',
+    storedText: () => CLEAN,
+    readEntry: readerFor({
+      'https://jobs.quiet.example/1': { status: 'read', text: CLEAN, jdPath: 'jds/a.md' },
+      'https://jobs.quiet.example/2': { status: 'read', text: CLEAN, jdPath: 'jds/b.md' },
+      'https://jobs.quiet.example/3': { status: 'read', text: CLEAN, jdPath: 'jds/c.md' },
+    }),
+  });
+  const out = sections(readFileSync(p, 'utf-8'));
+  eq('the marker in the note cell scores', extractRouteSegment(out.pending[0]), 'score');
+  eq('the same words in the title do not', extractRouteSegment(out.pending[1]), 'standard');
+  eq('nor in the company name', extractRouteSegment(out.pending[2]), 'standard');
+  eq('nor in the URL or the stored filename', extractRouteSegment(out.pending[3]), 'standard');
+}
+
+// ── A configured company alias dedups against the tracker too ───────
+//
+// The sweep builds its canonicaliser from `company_aliases`; the gate used the
+// plain lowercase fallback, so a tracker row filed under the brand and a queue
+// line under the ATS org never matched — the exact duplicate this check exists
+// to catch.
+{
+  const trackerText = [
+    '# Applications Tracker',
+    '',
+    '| # | Date | Company | Via | Role | Score | Status | PDF | Report | Notes |',
+    '|---|------|---------|-----|------|-------|--------|-----|--------|-------|',
+    '| 12 | 2026-09-01 | Fin | — | AI Infrastructure Engineer | 4.0/5 | Applied | ❌ | - | Brand name, not the ATS org |',
+    '',
+  ].join('\n');
+  const canonicalize = buildCompanyCanonicalizer({ Fin: ['Intercom'] });
+  const trackerIndex = collectTrackerDedupIndex({ applicationsText: trackerText, canonicalize });
+
+  const p = pipelineFile([
+    '- [ ] https://boards.greenhouse.io/intercom/jobs/1 | Intercom | AI Infrastructure Engineer | London',
+  ]);
+  const counts = await readPipelineAdverts({
+    pipelinePath: p,
+    gate,
+    tiersTable: TIERS,
+    trackerIndex,
+    canonicalizeCompany: canonicalize,
+    readEntry: readerFor({}),
+  });
+  eq('the alias matches the tracker row', counts.duplicates, 1);
+  eq('and names the row it duplicates', counts.duplicateRows[0]?.row, 12);
+
+  // Without the canonicaliser the same pair is missed, which is the defect.
+  const p2 = pipelineFile([
+    '- [ ] https://boards.greenhouse.io/intercom/jobs/1 | Intercom | AI Infrastructure Engineer | London',
+  ]);
+  const plain = await readPipelineAdverts({
+    pipelinePath: p2,
+    gate,
+    tiersTable: TIERS,
+    trackerIndex: collectTrackerDedupIndex({ applicationsText: trackerText }),
+    readEntry: readerFor({}),
+  });
+  eq('with no alias map configured the two are still two companies', plain.duplicates, 0);
 }
 
 // ── The two line writers, on their own ──────────────────────────────

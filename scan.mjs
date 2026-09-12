@@ -103,7 +103,7 @@ try {
 const parseYaml = yaml.load;
 
 // ── Config ──────────────────────────────────────────────────────────
-import { getCareerOpsRoot } from './path-resolver.mjs';
+import { getCareerOpsRoot, resolveTrackerPath } from './path-resolver.mjs';
 const CODE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA_ROOT = getCareerOpsRoot();
 
@@ -128,15 +128,21 @@ export const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE || path.join(DATA_R
 export const JDS_DIR = path.join(DATA_ROOT, 'jds');
 // The tier table (ticket B2). data/companies.tsv belongs to the Tiers chat:
 // this scanner reads it and never writes it, and a company it does not name is
-// untiered rather than an error. Overridable like the paths above so a test can
-// point at a fixture instead of the real table.
+// untiered rather than an error.
+//
+// CAREER_OPS_TIERS is a TEST SEAM, not a documented user override: it exists so
+// a run can be pointed at a fixture table instead of the real one. It is
+// deliberately absent from AGENTS.md and DATA_CONTRACT.md. If it ever becomes
+// something a user is told to set, it needs a row there and a line in the
+// docs; until then, treat it as internal.
 export const TIERS_PATH = process.env.CAREER_OPS_TIERS || path.join(DATA_ROOT, 'data/companies.tsv');
-// The tracker. CAREER_OPS_TRACKER is the fork-wide override every other
-// script already honours (AGENTS.md, 'Tracker Path & Canonical Writes'); the
-// scanner did not, so there was no way to point --read-pipeline --gate at a
-// copy. Read-only here: the gate reads the tracker for its dedup keys and
-// nothing in this file writes it.
-const APPLICATIONS_PATH = process.env.CAREER_OPS_TRACKER || path.join(DATA_ROOT, 'data/applications.md');
+// The tracker, through the repo's own resolver rather than a sixth spelling of
+// the same rule: it honours CAREER_OPS_TRACKER, canonicalises symlinks, and
+// carries the `{DATA_ROOT}/applications.md` fallback AGENTS.md records. The
+// scanner used to hard-code the path and so could not be pointed at a copy,
+// which is what `--read-pipeline --gate` needs to be proved against. Read-only
+// here: nothing in this file writes the tracker.
+const APPLICATIONS_PATH = resolveTrackerPath(DATA_ROOT);
 const PROVIDERS_DIR = path.resolve(CODE_ROOT, 'providers');
 
 // Ensure required directories exist (fresh setup). Stays rooted in the user-data
@@ -1628,6 +1634,31 @@ const ROLE_LOCATION_SUFFIXES = new Set([
   'zurich',
 ]);
 
+/**
+ * The location suffixes that are whole markets rather than one office.
+ *
+ * A city or a country after the title is how one company splits one requisition
+ * per office, and collapsing those onto one key is what this normalizer exists
+ * for. A region is not that: "Account Executive, EMEA" and "Account Executive,
+ * Americas" are two jobs on two continents, and one key for both means the
+ * second is dropped as a duplicate and never reaches the queue.
+ *
+ * So a region is kept in the key, in the bracketed spelling as well as the
+ * comma one. That is also what makes the two spellings agree — both keep the
+ * region rather than both losing it — which is the Anthropic case seam 7 was
+ * written for (ticket B2).
+ */
+const ROLE_REGION_SUFFIXES = new Set([
+  'amer',
+  'americas',
+  'apac',
+  'emea',
+  'eu',
+  'europe',
+  'latin america',
+  'north america',
+]);
+
 const ROLE_REMOTE_SUFFIXES = new Set([
   'distributed',
   'hybrid',
@@ -1684,6 +1715,35 @@ function isRoleLocationSuffix(tag) {
 }
 
 /**
+ * Whether a trailing tag names a whole market, and so must stay in the key.
+ *
+ * Read the same way `isRoleLocationSuffix` reads a tag — the whole tag, then
+ * its comma/slash-separated parts, then the "Remote EMEA" shape — so a mixed
+ * tag like "(EMEA, Remote)" counts as a region rather than slipping through as
+ * a plain place.
+ */
+function roleSuffixIsRegion(tag) {
+  const normalized = normalizeRoleSuffixTag(tag);
+  if (!normalized) return false;
+  if (ROLE_REGION_SUFFIXES.has(normalized)) return true;
+
+  const raw = String(tag ?? '').toLowerCase();
+  const parts = raw
+    .split(/[,/|;]+|\s+(?:and|or)\s+/g)
+    .map(normalizeRoleSuffixTag)
+    .filter(Boolean);
+  if (parts.some(part => ROLE_REGION_SUFFIXES.has(part))) return true;
+
+  for (const remote of ROLE_REMOTE_SUFFIXES) {
+    const prefix = `${remote} `;
+    if (normalized.startsWith(prefix) && ROLE_REGION_SUFFIXES.has(normalized.slice(prefix.length))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Normalize a role title for stable scan-time duplicate identity.
  *
  * Equivalent tracker/provider titles should collapse to one key when a company
@@ -1727,6 +1787,10 @@ export function normalizeRoleForDedup(role) {
     const match = title.match(/\s*[\[(]([^[\]()]+)[\])]\s*$/)
       || title.match(/\s*,\s*([^,]+?)\s*$/);
     if (!match || !isRoleLocationSuffix(match[1])) break;
+    // A region stays in the key. Dropping it merged two continents' worth of
+    // one title into one row and lost the second as a duplicate; keeping it is
+    // also what makes the bracketed and the comma spelling agree.
+    if (roleSuffixIsRegion(match[1])) break;
     // A title that is nothing but the tag ("EMEA") must not key to '' and bury
     // every other role at that company.
     const stripped = title.slice(0, match.index).trimEnd();
@@ -2430,7 +2494,13 @@ export function pipelineLineIdentity(line) {
     localPath = cells[urlIndex].slice('local:'.length).trim();
   }
   const [company = '', title = ''] = cells.slice(urlIndex + 1);
-  return { url, company, title, localPath };
+  // The note cell, not the whole line. The route marker is looked for in a note
+  // somebody wrote; searching the line would find it in the company cell, the
+  // title, the URL and the jd: filename as well, which is a route decided by a
+  // coincidence of spelling.
+  const noteCell = cells.find(cell => /^note:/i.test(cell)) || '';
+  const note = noteCell ? noteCell.slice(noteCell.indexOf(':') + 1).trim() : '';
+  return { url, company, title, localPath, note };
 }
 
 // postedAt arrives as epoch ms (or absent). Convert to 'YYYY-MM-DD', or '' when missing.
@@ -2859,6 +2929,10 @@ export async function readPipelineAdverts({
   gate = null,
   tiersTable = null,
   trackerIndex = null,
+  // The same canonicaliser the sweep dedups with. Without it a tracker row
+  // filed under one spelling and a queue line under its configured alias never
+  // match, which is exactly the duplicate this check exists to catch.
+  canonicalizeCompany = defaultCompanyNormalizer,
   titleFilterConfig = null,
   today = localToday(),
 } = {}) {
@@ -2909,7 +2983,7 @@ export async function readPipelineAdverts({
       // the same link or under another board's link and a slightly different
       // title. Checked before the read, so a duplicate costs no fetch either.
       if (gate && trackerIndex) {
-        const duplicate = matchTrackerDuplicate(identity, trackerIndex);
+        const duplicate = matchTrackerDuplicate(identity, trackerIndex, canonicalizeCompany);
         if (duplicate) {
           counts.duplicates++;
           counts.duplicateRows.push({ ...identity, ...duplicate });
@@ -2999,7 +3073,7 @@ export async function readPipelineAdverts({
       }
 
       // ── 4. The route ──────────────────────────────────────────────
-      const routing = routeDetail(identity.company, tiersTable, line);
+      const routing = routeDetail(identity.company, tiersTable, identity.note);
       countRoute(counts.routed, routing);
       lines[i] = insertRouteSegment(workingLine, routing.route);
     }
@@ -3821,6 +3895,7 @@ async function main() {
     // labels with jd:, exactly as B1 shipped it.
     const gating = args.includes('--gate');
     const candidateCountryForGate = gating ? loadCandidateCountry() : '';
+    const canonicalizeCompanyForGate = buildCompanyCanonicalizer(config.company_aliases);
     const gate = gating
       ? buildAdvertGate({
         contentFilter: buildContentFilter(config.content_filter),
@@ -3835,7 +3910,10 @@ async function main() {
       reread: args.includes('--reread'),
       gate,
       tiersTable: gating ? loadTiersTable(TIERS_PATH) : null,
-      trackerIndex: gating ? loadTrackerDedupIndex({ trackerPath: APPLICATIONS_PATH }) : null,
+      trackerIndex: gating
+        ? loadTrackerDedupIndex({ trackerPath: APPLICATIONS_PATH, canonicalize: canonicalizeCompanyForGate })
+        : null,
+      canonicalizeCompany: canonicalizeCompanyForGate,
       titleFilterConfig: config.title_filter,
       readEntry: async (entry) => {
         const outcome = await reader.read(entry);
