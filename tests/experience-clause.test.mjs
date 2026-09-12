@@ -123,10 +123,12 @@ function only(label, text) {
   // T13 — A04: company history is not candidate experience.
   const text = 'We have served customers for 5+ years. You need two years of experience.';
   const clauses = extractExperienceClauses(text);
-  eq('T13 the only clause read is the candidate one', clauses.length, 1);
-  if (clauses.length === 1) {
-    eq('T13 reads the two-year requirement', clauses[0].minimum, 2);
-    eq('T13 it is about the candidate', clauses[0].subject, 'candidate');
+  eq('T13 reads both sentences', clauses.length, 2);
+  if (clauses.length === 2) {
+    eq('T13 the five-year clause is read', clauses[0].minimum, 5);
+    eq('T13 and attributed to the company, not to him', clauses[0].subject, 'company');
+    eq('T13 the two-year requirement is his', clauses[1].minimum, 2);
+    eq('T13 and is about the candidate', clauses[1].subject, 'candidate');
   }
   eq('T13 has no binding clause at five', binding(text).filter(c => c.minimum >= 5).length, 0);
 }
@@ -139,9 +141,9 @@ function only(label, text) {
 }
 
 // ── 2. A company sentence that would otherwise cost the row ──────────
-// T13's first sentence is company history with no experience word in it, so it
-// is not an experience clause at all. This is the harder A04 case: a company
-// sentence that *does* say "experience", where only the subject saves it.
+// T13's is company history beside a candidate requirement. These are the same
+// finding without the neighbour: a company sentence carrying a five-year
+// number and the word "experience", where only the subject saves the row.
 
 {
   const c = only('company subject', 'We have over 5 years of experience building payments infrastructure.');
@@ -159,6 +161,16 @@ function only(label, text) {
 {
   const c = only('our platform', 'Our platform has been in business for ten years of continuous operating experience.');
   if (c) eq('"our platform has" is the company too', c.subject, 'company');
+}
+
+{
+  // Navan's real advert, which read as company history on the first build:
+  // a bare "in business" cue matched "experience in business operations".
+  const c = only('in business operations', '5+ years experience in business operations and finance operations.');
+  if (c) {
+    eq('"experience in business operations" is not the employer\'s age', c.subject !== 'company', true);
+    eq('and the minimum is still five', c.minimum, 5);
+  }
 }
 
 {

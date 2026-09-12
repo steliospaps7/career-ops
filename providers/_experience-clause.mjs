@@ -1,0 +1,299 @@
+/**
+ * providers/_experience-clause.mjs — what an advert says about years.
+ *
+ * Ticket C, C1. The scanner used to match years phrases as substrings, and the
+ * 11 September audit (F01, A01 to A04) showed what that costs: "5+ years is
+ * preferred, not required" was rejected, "we have served customers for
+ * 5+ years" was rejected, "5 years" and "5 to 7 years" were kept, and Super
+ * Payments' Product Manager was dropped on the substring "5+ years" while its
+ * advert reads "3–5+ years … does not preclude applications from candidates
+ * with less". A list of phrases cannot tell a requirement from a wish, or the
+ * employer's age from the reader's career.
+ *
+ * So this module reads instead of matching. It is pure: text in, clauses out,
+ * no configuration, no file, no network, no clock. The policy — which minimum
+ * is out, which is a long shot — is not here; it is the gate's, in `scan.mjs`,
+ * from the 12 September decision table in
+ * `projects/career/General Role Criteria v1.md`.
+ *
+ * A clause is `{ minimum, mandatory, subject, sentence }`:
+ *
+ *   minimum    the lower bound, in years. "3 to 5+ years" is a three.
+ *   mandatory  true on "must", "required", "at least", "minimum", "need",
+ *              "essential"; false on "preferred", "ideally", "nice to have",
+ *              "bonus", "we'd love it if", "would be a plus", and on a later
+ *              sentence saying less experience does not preclude; null when the
+ *              advert says neither, which is the ordinary requirements-list
+ *              shape and which the gate treats as a bar.
+ *   subject    `company` when the sentence is about the employer or the product,
+ *              `candidate` when it is about the reader, `unknown` otherwise.
+ *   sentence   the advert's own words, so a cut can be quoted back.
+ *
+ * There is deliberately no `maximum`: the gate never reads one, and a field
+ * nothing reads is a field that drifts.
+ */
+
+/** Digits or the words one to ten. Past ten an advert writes the number. */
+const NUMBER_WORDS = {
+  one: 1, two: 2, three: 3, four: 4, five: 5,
+  six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+};
+
+const NUMBER = `(?:\\d{1,2}|${Object.keys(NUMBER_WORDS).join('|')})`;
+
+/** The hyphen, the en dash, the em dash and the word, all of them ranges.
+ * "up to" is absent on purpose: "up to 5 years" is a ceiling, and this module
+ * reads lower bounds only. */
+const RANGE = '(?:-|–|—|to)';
+
+/** "5 or more years" puts its filler between the number and the word. It says
+ * nothing the lower bound does not already say, so it is skipped rather than
+ * read. */
+const OR_MORE = '(?:\\s*or\\s+(?:more|above|greater|over))?';
+
+/**
+ * One years phrase: a number, an optional "+", an optional range to a second
+ * number, then "year", "years", "yr" or "yrs", and an optional trailing "+"
+ * for the "5 years+" form. "or more" and "more than" need no pattern of their
+ * own — they change nothing about the lower bound this reads.
+ */
+const CLAUSE_RE = new RegExp(
+  `(${NUMBER})\\s*\\+?\\s*(?:${RANGE}\\s*(?:${NUMBER})\\s*\\+?\\s*)?${OR_MORE}\\s*(?:years?|yrs?)\\b\\s*\\+?`,
+  'gi',
+);
+
+/**
+ * A years number only counts when the sentence is about experience. Without
+ * this the Greenhouse disability form costs a row: Super Payments' own page
+ * carries "People can become disabled, so we need to ask this question at least
+ * every five years", which has "at least", "need" and "five years" in it and
+ * nothing whatever to do with the job.
+ */
+const EXPERIENCE_RE = /experien|background|track record|in a similar role|tenure|seniority/i;
+
+/** Windows, in characters, either side of the phrase. Bounded so one enormous
+ * bullet block does not read as one sentence. A stored advert really is one
+ * line: the bullets carry no full stops. */
+const WINDOW_BEFORE = 110;
+const WINDOW_AFTER = 130;
+
+/** The relevance window is NOT clipped to the sentence, because the word
+ * "experience" is often in the neighbouring clause: the audit's own T12 reads
+ * "You need two years of experience; 5+ years is preferred, not required", and
+ * the second half carries the bar without carrying the word. Kept close so
+ * Greenhouse's disability form — "we need to ask this question at least every
+ * five years" — still reaches nothing. */
+const RELEVANCE_WINDOW = 150;
+
+/** The quoted sentence is read by a person on a DROP line, so it is capped. */
+const SENTENCE_CAP = 240;
+
+const MANDATORY_CUES = [
+  'must have', 'must', 'required', 'requires', 'require', 'requirement',
+  'at least', 'minimum', 'a minimum of', 'need', 'needs', 'essential',
+  'proven', 'demonstrable',
+];
+
+const PREFERENCE_CUES = [
+  'preferred', 'preferable', 'preferably', 'ideally', 'nice to have',
+  'nice-to-have', 'bonus', "we'd love it if", 'we would love it if',
+  'would be a plus', 'is a plus', 'desirable', 'not required', 'not essential',
+  'not a must', 'advantageous',
+];
+
+/** A sentence withdrawing the bar outright, which is Super Payments' footnote
+ * and is common in UK adverts. */
+const NOT_PRECLUDE_RE = /does not preclude|do not preclude|not preclude applications|less experience (?:is|are) (?:fine|welcome)/i;
+
+const CANDIDATE_CUES = [
+  'you', 'your', "you'll", "you're", 'the candidate', 'candidates',
+  'applicants', 'the successful candidate', 'the ideal candidate',
+  'the right person', 'we are looking for someone', 'looking for someone',
+];
+
+const COMPANY_CUES = [
+  'we have', "we've", 'we had', 'our platform has', 'our product has',
+  'our company has', 'our team has', 'the company has', 'we serve',
+  'we have served', 'founded', 'we were established',
+  'has been trading',
+  // Spelled out rather than a bare "in business": Navan's real advert says
+  // "5+ years experience in business operations", and the short form read that
+  // requirement as the employer's own age and would have kept the row.
+  'been in business', 'in business for', 'in business since',
+];
+
+function toNumber(token) {
+  const word = token.toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(NUMBER_WORDS, word)) return NUMBER_WORDS[word];
+  const n = Number.parseInt(word, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Every occurrence of every cue, with where it sits. Word-bounded on the short
+ * ones ("you", "need") so "your" does not answer for "you" and "engineer" does
+ * not answer for "need"; plain substring on the phrases, where a boundary adds
+ * nothing and an apostrophe form would break it.
+ */
+function cueHits(haystack, cues) {
+  const hits = [];
+  for (const cue of cues) {
+    const needsBoundary = !cue.includes(' ') && !cue.includes("'");
+    let from = 0;
+    for (;;) {
+      const at = haystack.indexOf(cue, from);
+      if (at === -1) break;
+      from = at + 1;
+      if (needsBoundary) {
+        const before = at === 0 ? '' : haystack[at - 1];
+        const after = haystack[at + cue.length] || '';
+        if (/[a-z0-9]/.test(before) || /[a-z0-9]/.test(after)) continue;
+      }
+      hits.push({ cue, at });
+    }
+  }
+  return hits;
+}
+
+/** The nearest cue to the phrase wins. A sentence carrying both a bar and a
+ * wish ("5+ years required, and we'd love it if you also …") means whichever
+ * word sits next to the number. */
+function nearest(hits, at) {
+  let best = null;
+  for (const hit of hits) {
+    const distance = Math.abs(hit.at - at);
+    if (!best || distance < best.distance) best = { ...hit, distance };
+  }
+  return best;
+}
+
+/** A true cue preceded by a negation is a preference: "not required" is the
+ * form the audit's own T12 uses. */
+function isNegated(haystack, at) {
+  const before = haystack.slice(Math.max(0, at - 8), at);
+  return /\b(?:not|never|n't)\s+$/.test(before);
+}
+
+function readMandatory(window, at) {
+  const bars = cueHits(window, MANDATORY_CUES)
+    .map(hit => ({ ...hit, value: isNegated(window, hit.at) ? false : true }));
+  const wishes = cueHits(window, PREFERENCE_CUES).map(hit => ({ ...hit, value: false }));
+  const all = [...bars, ...wishes];
+  if (all.length === 0) return null;
+  // A tie goes to the preference: the cost of reading a wish as a bar is a role
+  // he never sees, and the cost the other way is one row he reads and discards.
+  const wish = nearest(all.filter(h => h.value === false), at);
+  const bar = nearest(all.filter(h => h.value === true), at);
+  if (wish && bar) return wish.distance <= bar.distance ? false : true;
+  return wish ? false : true;
+}
+
+function readSubject(window, at) {
+  const candidate = nearest(cueHits(window, CANDIDATE_CUES), at);
+  const company = nearest(cueHits(window, COMPANY_CUES), at);
+  if (candidate && company) return candidate.distance <= company.distance ? 'candidate' : 'company';
+  if (candidate) return 'candidate';
+  if (company) return 'company';
+  return 'unknown';
+}
+
+/**
+ * The advert's own words around the clause, for the DROP line.
+ *
+ * Clipped to the clause's sentence, then to the window, then to the cap, and
+ * marked with an ellipsis on whichever side was actually cut — a sentence that
+ * fits is quoted whole, with no ellipsis at all. The clause itself is always
+ * inside what comes back: a cut needs its sentence quoted, and a quote that
+ * had lost the number would prove nothing.
+ */
+function quote(text, sentenceStart, sentenceEnd, matchStart, matchEnd) {
+  let from = Math.max(sentenceStart, matchStart - WINDOW_BEFORE);
+  let to = Math.min(sentenceEnd, matchEnd + WINDOW_AFTER);
+  if (to - from > SENTENCE_CAP) {
+    const slack = Math.max(0, SENTENCE_CAP - (matchEnd - matchStart));
+    from = Math.max(from, matchStart - Math.floor(slack * 0.45));
+    to = Math.min(to, from + SENTENCE_CAP);
+  }
+  // Snap inwards to a word boundary so the quote never starts or ends mid-word.
+  if (from > sentenceStart) {
+    const space = text.indexOf(' ', from);
+    if (space !== -1 && space < matchStart) from = space + 1;
+  }
+  if (to < sentenceEnd) {
+    const space = text.lastIndexOf(' ', to);
+    if (space > matchEnd) to = space;
+  }
+  let quoted = text.slice(from, to).trim();
+  if (from > sentenceStart) quoted = `\u2026${quoted}`;
+  if (to < sentenceEnd) quoted = `${quoted}\u2026`;
+  return quoted;
+}
+
+/** Sentence boundaries in the collapsed text: a full stop, a question mark, an
+ * exclamation mark or a semicolon followed by a space. A bullet block has none
+ * of these, which is why the window above exists as well. */
+function sentenceBounds(text, at) {
+  let start = 0;
+  for (let i = at; i > 0; i--) {
+    if (/[.!?;]/.test(text[i - 1]) && (i >= text.length || /\s/.test(text[i]))) { start = i; break; }
+  }
+  let end = text.length;
+  for (let i = at; i < text.length; i++) {
+    if (/[.!?;]/.test(text[i]) && (i + 1 >= text.length || /\s/.test(text[i + 1]))) { end = i + 1; break; }
+  }
+  return { start, end };
+}
+
+/**
+ * Every experience clause the text carries, in the order the advert writes them.
+ *
+ * @param {string} text - the advert, as stored. Anything else yields `[]`.
+ * @returns {Array<{minimum: number, mandatory: (boolean|null), subject: string, sentence: string}>}
+ */
+export function extractExperienceClauses(text) {
+  if (typeof text !== 'string') return [];
+  // One line: the stored file's newlines and tabs are layout, not meaning, and
+  // collapsing them first keeps every offset below in one coordinate system.
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (!flat) return [];
+  const lower = flat.toLowerCase();
+
+  // A withdrawal applies to the clauses before it and to its own sentence, so
+  // the earliest one is the only position that matters.
+  const withdrawal = lower.search(NOT_PRECLUDE_RE);
+
+  const clauses = [];
+  const re = new RegExp(CLAUSE_RE.source, CLAUSE_RE.flags);
+  for (let m = re.exec(flat); m; m = re.exec(flat)) {
+    const minimum = toNumber(m[1]);
+    if (minimum == null) continue;
+
+    // Is this a years number about experience at all? Asked of a wider window
+    // than the cues below, and of the neighbouring text rather than only this
+    // sentence.
+    const near = lower.slice(
+      Math.max(0, m.index - RELEVANCE_WINDOW),
+      Math.min(lower.length, m.index + m[0].length + RELEVANCE_WINDOW),
+    );
+    if (!EXPERIENCE_RE.test(near)) continue;
+
+    // The cues and the quote come from the clause's own sentence, so a
+    // preference in one half of a semicolon does not answer for the other.
+    const bounds = sentenceBounds(flat, m.index);
+    const from = Math.max(bounds.start, m.index - WINDOW_BEFORE);
+    const to = Math.min(bounds.end, m.index + m[0].length + WINDOW_AFTER);
+    const window = lower.slice(from, to);
+
+    const at = m.index - from;
+    let mandatory = readMandatory(window, at);
+    if (withdrawal !== -1 && withdrawal >= bounds.start) mandatory = false;
+
+    clauses.push({
+      minimum,
+      mandatory,
+      subject: readSubject(window, at),
+      sentence: quote(flat, bounds.start, bounds.end, m.index, m.index + m[0].length),
+    });
+  }
+  return clauses;
+}
