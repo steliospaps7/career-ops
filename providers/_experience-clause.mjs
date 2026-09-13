@@ -57,9 +57,14 @@ const OR_MORE = '(?:\\s*or\\s+(?:more|above|greater|over))?';
  * number, then "year", "years", "yr" or "yrs", and an optional trailing "+"
  * for the "5 years+" form. "or more" and "more than" need no pattern of their
  * own — they change nothing about the lower bound this reads.
+ *
+ * The leading `\b` stops the number starting inside a word or a longer number:
+ * without it "everyone years of experience" read a minimum of one, from the
+ * "one" in "everyone", and "founded in 1995 years of experience" read
+ * ninety-five and dropped the row.
  */
 const CLAUSE_RE = new RegExp(
-  `(${NUMBER})\\s*\\+?\\s*(?:${RANGE}\\s*(?:${NUMBER})\\s*\\+?\\s*)?${OR_MORE}\\s*(?:years?|yrs?)\\b\\s*\\+?`,
+  `\\b(${NUMBER})\\s*\\+?\\s*(?:${RANGE}\\s*(?:${NUMBER})\\s*\\+?\\s*)?${OR_MORE}\\s*(?:years?|yrs?)\\b\\s*\\+?`,
   'gi',
 );
 

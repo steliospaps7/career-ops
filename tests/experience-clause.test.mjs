@@ -392,6 +392,18 @@ function only(label, text) {
   if (leaked === 0) pass(`none of the ${boilerplate.length} boilerplate sentences binds the row`);
 }
 
+{
+  // A number only starts at a word boundary. Without one the reader took the
+  // "one" out of "everyone" as a minimum of one, and the "95" out of 1995 as a
+  // minimum of ninety-five, which drops the row. The build review's two cases;
+  // its comma form of the second is kept as well, and it reads nothing either.
+  eq('the "one" inside "everyone" is not a number', extractExperienceClauses('everyone years of experience').length, 0);
+  eq('the "95" inside 1995 is not a number', extractExperienceClauses('founded in 1995 years of experience').length, 0);
+  eq('nor with a comma after the year', extractExperienceClauses('founded in 1995, years of experience').length, 0);
+  const c = only('a real number after a year', 'Founded in 1995, we need 3 years of experience.');
+  if (c) eq('a real number beside a year is still read', c.minimum, 3);
+}
+
 // ── 8. The module is pure, and survives what a real page hands it ────
 
 {
