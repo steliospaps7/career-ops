@@ -2135,6 +2135,67 @@ export function judgeExperienceYears(text, extract = extractExperienceClauses) {
   return { drop: false };
 }
 
+// The words the location rule reads (ticket C, C4). Country words, not towns.
+const UK_PLACE_RE = /^(?:united kingdom|uk|u\.k\.|gb|gbr|great britain|britain|england|scotland|wales|northern ireland)$/i;
+const NOT_A_TOWN_RE = /\b(?:remote|hybrid|home|anywhere|on-?site|office)\b/i;
+const ATTENDANCE_RE = /\bremote(?:ly)?\b|\bwork(?:ing)? from home\b|\bhybrid from anywhere\b|\blondon\b/i;
+
+// What "London" means: the 32 London boroughs, plus the City, which the
+// /london/ test above already reads. This defines London and is not a list of
+// commutable towns: a listing that writes "Harrow, England, United Kingdom" is
+// a London listing, and a town outside these is still read from the advert.
+const LONDON_BOROUGHS = new Set([
+  'barking and dagenham', 'barnet', 'bexley', 'brent', 'bromley', 'camden',
+  'croydon', 'ealing', 'enfield', 'greenwich', 'hackney', 'hammersmith and fulham',
+  'haringey', 'harrow', 'havering', 'hillingdon', 'hounslow', 'islington',
+  'kensington and chelsea', 'kingston upon thames', 'lambeth', 'lewisham',
+  'merton', 'newham', 'redbridge', 'richmond upon thames', 'southwark', 'sutton',
+  'tower hamlets', 'waltham forest', 'wandsworth', 'westminster',
+]);
+
+function isLondonBorough(place) {
+  return LONDON_BOROUGHS.has(String(place).toLowerCase().replace(/\s*&\s*/g, ' and ').replace(/\s+/g, ' ').trim());
+}
+
+/**
+ * Where the listing says the job is, read against what the advert says about
+ * attendance (ticket C, C4).
+ *
+ * A location that ends in "United Kingdom" says nothing about whether Stelios
+ * can do the job from London. The rule fires on one shape only: a place
+ * followed by nothing but UK words ("Amersham, England, United Kingdom",
+ * "Manchester, GB"), or by one county and then UK words ("Reading, Berkshire,
+ * United Kingdom"), with no London in it. That place is the town, read from
+ * the listing itself, so there is no town list. Such a row stays only when the
+ * listing or the advert says remote, work from home or hybrid from anywhere,
+ * or names London, and is then labelled `remote-uk`; otherwise it is dropped
+ * with the town named, which is the brief's "Outside London" hard fail.
+ *
+ * A London listing, a London borough ("Harrow, England, United Kingdom"), a
+ * country on its own, a list of countries and a town with no country word are
+ * all left alone: none of them names a UK town outside London.
+ *
+ * @param {string} location - the listing's location cell.
+ * @param {string} text - the advert, as stored.
+ * @returns {{drop: boolean, town?: string, label?: string}}
+ */
+export function judgeAttendance(location, text) {
+  const listed = typeof location === 'string' ? location.trim() : '';
+  if (!listed || /\blondon\b/i.test(listed)) return { drop: false };
+  const parts = listed.replace(/\([^)]*\)/g, ' ').split(/[,;·|]/).map(part => part.trim()).filter(Boolean);
+  const town = parts[0] || '';
+  // After the town: UK words only, or one county and then UK words
+  // ("Reading, Berkshire, United Kingdom").
+  const rest = parts.slice(1);
+  const ukFrom = (i) => rest.length > i && rest.slice(i).every(part => UK_PLACE_RE.test(part));
+  const county = rest[0] || '';
+  const inTheUk = ukFrom(0) || (ukFrom(1) && !NOT_A_TOWN_RE.test(county));
+  if (!inTheUk || UK_PLACE_RE.test(town) || NOT_A_TOWN_RE.test(town)) return { drop: false };
+  if (isLondonBorough(town)) return { drop: false };
+  if (ATTENDANCE_RE.test(`${listed}\n${String(text ?? '')}`)) return { drop: false, label: 'remote-uk' };
+  return { drop: true, town };
+}
+
 /**
  * Why a row was dropped, in the words of the filter that dropped it.
  *
@@ -2210,14 +2271,15 @@ export function buildDropExplainer(config = {}, candidateCountry = '') {
   };
 }
 
-/** The three drop reasons the gate can return, in the order it tries them. */
-export const ADVERT_DROP_REASONS = ['content', 'years', 'countryEligibility', 'visa'];
+/** The drop reasons the gate can return, in the order it tries them. */
+export const ADVERT_DROP_REASONS = ['content', 'years', 'countryEligibility', 'visa', 'location'];
 
 export const ADVERT_DROP_LABELS = {
   content: 'content',
   years: 'years',
   countryEligibility: 'eligibility',
   visa: 'visa',
+  location: 'location',
 };
 
 /**
@@ -2239,7 +2301,7 @@ export function buildAdvertGate({ contentFilter, countryEligibilityFilter, visaF
   const why = explain || (() => '');
   const clauses = experienceClauses || extractExperienceClauses;
 
-  return function gate({ description = '', matchedKeywords = [], readStatus = null } = {}) {
+  return function gate({ description = '', matchedKeywords = [], readStatus = null, location = '' } = {}) {
     if (readStatus != null && readStatus !== 'read') return { drop: false, unread: true };
     if (!content(description, matchedKeywords)) {
       return { drop: true, reason: 'content', phrase: why('content', description, matchedKeywords) };
@@ -2257,7 +2319,16 @@ export function buildAdvertGate({ contentFilter, countryEligibilityFilter, visaF
     if (!visa(description)) {
       return { drop: true, reason: 'visa', phrase: why('visa', description) };
     }
-    return years.years ? { drop: false, years: years.years } : { drop: false };
+    // The location rule (ticket C, C4), after the read and last, so a row
+    // another rule drops is named for that rule. The town is the phrase.
+    const attendance = judgeAttendance(location, description);
+    if (attendance.drop) {
+      return { drop: true, reason: 'location', phrase: attendance.town };
+    }
+    const kept = { drop: false };
+    if (years.years) kept.years = years.years;
+    if (attendance.label) kept.location = attendance.label;
+    return kept;
   };
 }
 
@@ -2278,14 +2349,15 @@ export function formatAdvertDropRow(row) {
 
 /** An empty route tally, one counter per bucket. */
 export function emptyRouteTally() {
-  const tally = { score: 0, standard: 0, buckets: {} };
-  for (const bucket of [...ROUTE_BUCKETS.score, ...ROUTE_BUCKETS.standard]) tally.buckets[bucket] = 0;
+  const tally = { score: 0, standard: 0, review: 0, buckets: {} };
+  for (const bucket of [...ROUTE_BUCKETS.score, ...ROUTE_BUCKETS.standard, ...ROUTE_BUCKETS.review]) tally.buckets[bucket] = 0;
   return tally;
 }
 
 export function countRoute(tally, detail) {
   if (!tally || !detail) return;
   if (detail.route === 'score') tally.score++;
+  else if (detail.route === 'review') tally.review = (tally.review || 0) + 1;
   else tally.standard++;
   tally.buckets[detail.bucket] = (tally.buckets[detail.bucket] || 0) + 1;
 }
@@ -2331,6 +2403,12 @@ export function formatGateSummary(dropTally, routeTally) {
       return `${route} ${routeTally[route]}${detail ? `   (${detail})` : ''}`;
     };
     lines.push(`Routes:                ${part('score')}   ${part('standard')}`);
+  }
+
+  // Its own line (ticket C, C2): an unread advert is neither route, and a
+  // count folded into `standard` is the silent pass the route exists to stop.
+  if (routeTally && routeTally.review > 0) {
+    lines.push(`Review:                ${routeTally.review}   unread, a person reads ${routeTally.review === 1 ? 'it' : 'them'} before anything is sent`);
   }
 
   return lines;
@@ -2452,6 +2530,10 @@ export function formatPipelineOffer(offer) {
   // the row reached the queue. A row below the stretch produces no segment.
   const years = yearsSegmentValue(offer.years);
   if (years != null) line = `${line} | years: ${years}`;
+  // Labeled attendance segment (ticket C, C4) — a UK town outside London kept
+  // because the advert says remote or names London. After years:, before route:.
+  const locationLabel = locationSegmentValue(offer.locationLabel);
+  if (locationLabel) line = `${line} | location: ${locationLabel}`;
   // Labeled route segment (ticket B2) — which effort this row gets, decided
   // before any evaluation token is spent. Ordered after jd:, before note:, for
   // a stable serialization. An offer with no route produces no segment, so a
@@ -2483,10 +2565,17 @@ export function extractJdSegment(line) {
  * serialization matches what formatPipelineOffer writes. A line that already
  * carries one is returned unchanged: the store is the record, and re-reading a
  * posting the run already read is exactly what the idempotent store prevents.
+ *
+ * `replace: true` is the one exception, and the recheck is its one caller: a
+ * segment naming an unread stub is repointed at the apify plugin's file, which
+ * is the advert the gate reads (B3 into the fork).
  */
-export function insertJdSegment(line, relPath) {
-  if (!relPath || extractJdSegment(line)) return line;
+export function insertJdSegment(line, relPath, { replace = false } = {}) {
+  if (!relPath) return line;
   const segment = `| jd: ${sanitizeMarkdownField(`local:${relPath}`)}`;
+  if (extractJdSegment(line)) {
+    return replace ? String(line).replace(JD_SEGMENT_RE, () => segment) : line;
+  }
   const noteAt = line.indexOf('| note:');
   if (noteAt === -1) return `${line.replace(/\s+$/, '')} ${segment}`;
   return `${line.slice(0, noteAt)}${segment} ${line.slice(noteAt)}`;
@@ -2502,40 +2591,89 @@ function yearsSegmentValue(value) {
   return Number.isInteger(n) && n > 0 && n < 100 ? n : null;
 }
 
+/**
+ * Read and write one labelled segment, `| <name>: <value>`, on a queue line.
+ * `years:` and `location:` share it.
+ *
+ * Like `insertRouteSegment` the writer overwrites, and for the same reason: the
+ * rule that wrote a label can change, and a re-run must be able to correct a
+ * label it wrote last week. A null removes it. A new segment goes in before
+ * `route:` and `note:`.
+ *
+ * @param {string} name - the label, e.g. `years`.
+ * @param {RegExp} pattern - matches the segment, the value in group 1.
+ * @param {(value: unknown) => (string|number|null)} normalise - the value to
+ *   write, or null for anything the label does not accept.
+ */
+function labelledSegment(name, pattern, normalise) {
+  const extract = (line) => {
+    const m = String(line).match(pattern);
+    return m ? normalise(m[1]) : null;
+  };
+  const insert = (line, raw) => {
+    const value = normalise(raw);
+    const text = String(line);
+    if (pattern.test(text)) {
+      if (value == null) return text.replace(pattern, '').replace(/\s{2,}/g, ' ').replace(/\s+$/, '');
+      return text.replace(pattern, `| ${name}: ${value}`);
+    }
+    if (value == null) return text;
+    const segment = `| ${name}: ${value}`;
+    for (const before of ['| route:', '| note:']) {
+      const at = text.indexOf(before);
+      if (at !== -1) return `${text.slice(0, at)}${segment} ${text.slice(at)}`;
+    }
+    return `${text.replace(/\s+$/, '')} ${segment}`;
+  };
+  return { extract, insert };
+}
+
+const yearsSegment = labelledSegment('years', YEARS_SEGMENT_RE, yearsSegmentValue);
+
 /** The long-shot years a queue line already carries, or null. */
 export function extractYearsSegment(line) {
-  const m = String(line).match(YEARS_SEGMENT_RE);
-  return m ? Number.parseInt(m[1], 10) : null;
+  return yearsSegment.extract(line);
 }
 
 /**
- * Add, replace or remove the segment on a queue line.
- *
- * Like `insertRouteSegment` this one overwrites, and for the same reason: the
- * rule that wrote it can change, and a re-run must be able to correct a label
- * it wrote last week. A null removes it, so a row the reader has since read
- * properly stops claiming a bar the advert does not carry.
+ * Add, replace or remove the segment on a queue line. A null removes it, so a
+ * row the reader has since read properly stops claiming a bar the advert does
+ * not carry.
  */
 export function insertYearsSegment(line, years) {
-  const value = yearsSegmentValue(years);
-  const text = String(line);
-  if (extractYearsSegment(text) != null) {
-    if (value == null) return text.replace(YEARS_SEGMENT_RE, '').replace(/\s{2,}/g, ' ').replace(/\s+$/, '');
-    return text.replace(YEARS_SEGMENT_RE, `| years: ${value}`);
-  }
-  if (value == null) return text;
-  const segment = `| years: ${value}`;
-  for (const before of ['| route:', '| note:']) {
-    const at = text.indexOf(before);
-    if (at !== -1) return `${text.slice(0, at)}${segment} ${text.slice(at)}`;
-  }
-  return `${text.replace(/\s+$/, '')} ${segment}`;
+  return yearsSegment.insert(line, years);
+}
+
+// The attendance segment on an existing queue line, `| location: remote-uk`.
+// Labelled, unlike the positional location cell, which it never replaces.
+const LOCATION_SEGMENT_RE = /\|\s*location:\s*(remote-uk)\b/i;
+
+/** The one label the location rule writes, or null for anything else. */
+function locationSegmentValue(value) {
+  return String(value ?? '').trim().toLowerCase() === 'remote-uk' ? 'remote-uk' : null;
+}
+
+const locationSegment = labelledSegment('location', LOCATION_SEGMENT_RE, locationSegmentValue);
+
+/** The attendance label a queue line already carries, or null. */
+export function extractLocationSegment(line) {
+  return locationSegment.extract(line);
+}
+
+/**
+ * Add, replace or remove the segment. A re-run under a changed advert or
+ * listing must be able to take a label back.
+ */
+export function insertLocationSegment(line, label) {
+  return locationSegment.insert(line, label);
 }
 
 // The route segment on an existing queue line, e.g. `| route: score`. Read and
 // written by the standalone pass, which labels lines the scan wrote on an
-// earlier day.
-const ROUTE_SEGMENT_RE = /\|\s*route:\s*(score|standard)\b/i;
+// earlier day. `review` is an unread advert's route (ticket C, C2); a value
+// this pattern does not know is never recognised as routed, so every recheck
+// would append a second segment beside it.
+const ROUTE_SEGMENT_RE = /\|\s*route:\s*(score|standard|review)\b/i;
 
 /** The route a queue line already carries, or null. */
 export function extractRouteSegment(line) {
@@ -2591,14 +2729,17 @@ export function pipelineLineIdentity(line) {
     if (urlIndex === -1) return null;
     localPath = cells[urlIndex].slice('local:'.length).trim();
   }
-  const [company = '', title = ''] = cells.slice(urlIndex + 1);
+  const [company = '', title = '', locationCell = ''] = cells.slice(urlIndex + 1);
+  // The positional location cell, for the location rule. A labelled segment in
+  // that position (`jd:`, `route:` and the rest) is not a location.
+  const location = /^[a-z][a-z_-]*:/i.test(locationCell) ? '' : locationCell;
   // The note cell, not the whole line. The route marker is looked for in a note
   // somebody wrote; searching the line would find it in the company cell, the
   // title, the URL and the jd: filename as well, which is a route decided by a
   // coincidence of spelling.
   const noteCell = cells.find(cell => /^note:/i.test(cell)) || '';
   const note = noteCell ? noteCell.slice(noteCell.indexOf(':') + 1).trim() : '';
-  return { url, company, title, localPath, note };
+  return { url, company, title, localPath, note, location };
 }
 
 // postedAt arrives as epoch ms (or absent). Convert to 'YYYY-MM-DD', or '' when missing.
@@ -2868,6 +3009,13 @@ export function buildAdvertReader({
     unreadableRows: [],
   };
 
+  /** A stored `read` advert, counted under the rung that read it. */
+  function countStoredRead(rung) {
+    tally.read++;
+    const bucket = rung && tally.rungs[rung] != null ? rung : 'stored';
+    tally.rungs[bucket]++;
+  }
+
   async function read({ url, company, title, location }) {
     tally.considered++;
     const identity = { url, company: company || '', title: title || '', location: location || '' };
@@ -2884,9 +3032,7 @@ export function buildAdvertReader({
       const reachedFirecrawl = existing.status !== 'read' && existing.status !== 'expired';
       if (reachedFirecrawl) tally.firecrawlResidue++;
       if (existing.status === 'read') {
-        tally.read++;
-        const rung = existing.rung && tally.rungs[existing.rung] != null ? existing.rung : 'stored';
-        tally.rungs[rung]++;
+        countStoredRead(existing.rung);
       } else {
         tally.unreadable++;
         // Bucketed under what the file actually says, not swept into `other`:
@@ -2939,9 +3085,7 @@ export function buildAdvertReader({
     if (!existing || existing.status !== 'read') return null;
     tally.considered++;
     tally.reused++;
-    tally.read++;
-    const rung = existing.rung && tally.rungs[existing.rung] != null ? existing.rung : 'stored';
-    tally.rungs[rung]++;
+    countStoredRead(existing.rung);
     return { status: 'read', rung: existing.rung, jdPath: existing.path, reused: true, reachedFirecrawl: false };
   }
 
@@ -3021,6 +3165,22 @@ export function formatReadSummary(tally, { firecrawlEnabled = false } = {}) {
 }
 
 /**
+ * The recheck's own count of what it did to the pending lines it kept.
+ * `Unchanged` replaced B1's "Already labelled" (ticket C, C5): every line is
+ * re-gated on every run, so what matters is whether this run changed it.
+ * `Loaded from store` counts the lines whose advert was already stored and was
+ * not fetched again.
+ */
+export function formatRecheckSummary(counts) {
+  const rows = (n) => `${n} ${n === 1 ? 'row' : 'rows'}`;
+  return [
+    `Loaded from store:     ${rows(counts.skipped || 0)}`,
+    `Unchanged:             ${rows(counts.unchanged || 0)}`,
+    `Relabelled:            ${rows(counts.changed || 0)}`,
+  ];
+}
+
+/**
  * Mark a pending line processed without losing anything it carried.
  *
  * The queue's older pre-screen shape (`- [x] #-- | <url> | skipped (…)`) throws
@@ -3065,9 +3225,15 @@ export function formatGateDropReason(row, today = localToday()) {
  *   2. meets the three advert filters on its stored text, and moves to
  *      Processed with the phrase that dropped it when one bites;
  *   3. is labelled `route: score` or `route: standard`, including a line that
- *      was already read on an earlier day and is not read again.
+ *      was already read on an earlier day and is not read again, or
+ *      `route: review` when nobody could read its advert.
  *
  * A row whose stored status is not `read` is never dropped on its advert.
+ *
+ * Every run re-gates every pending line under the current rules and rewrites a
+ * line only when its segments change (ticket C, C5). A line moved to Processed
+ * keeps every cell, its `triage:` verdict included, with the reason appended.
+ * The tracker is read, never written.
  *
  * `readEntry` is injected so the whole pass is testable against a temporary
  * file with no network and no store.
@@ -3103,6 +3269,10 @@ export async function readPipelineAdverts({
     duplicates: 0,
     duplicateRows: [],
     moved: 0,
+    // Every pending line the pass looked at and did not move (ticket C, C5):
+    // `changed` when the run rewrote it, `unchanged` when it is byte-identical.
+    changed: 0,
+    unchanged: 0,
   };
   if (typeof readEntry !== 'function') throw new Error('readPipelineAdverts: readEntry is required');
   if (!existsSync(pipelinePath)) return counts;
@@ -3120,6 +3290,8 @@ export async function readPipelineAdverts({
     // stay stable while it runs.
     const movedOut = new Set();
     const movedLines = [];
+    // Each pending line as it was read, to count what the run changed.
+    const before = new Map();
 
     for (let i = startIdx + 1; i < endIdx; i++) {
       const line = lines[i];
@@ -3130,6 +3302,7 @@ export async function readPipelineAdverts({
       // An entry already ticked has been dealt with; the Pending section can
       // carry one when a mode moved the state without moving the line.
       if (!/^\s*- \[ \]/.test(line)) continue;
+      before.set(i, line);
 
       const identity = pipelineLineIdentity(line) || { url: '', company: '', title: '' };
 
@@ -3169,7 +3342,7 @@ export async function readPipelineAdverts({
       const alreadyRead = Boolean(storedPath) && !(reread && storedStatus(storedPath) !== 'read');
       // The segment is pointed at the file the gate reads, so triage, which
       // follows `jd:` and does not fetch, reads the advert and not the stub.
-      let workingLine = preferLocal ? line.replace(JD_SEGMENT_RE, `| jd: local:${storedPath}`) : line;
+      let workingLine = preferLocal ? insertJdSegment(line, storedPath, { replace: true }) : line;
       let readStatus = null;
       let text = '';
       let jdPath = storedPath || '';
@@ -3180,7 +3353,9 @@ export async function readPipelineAdverts({
         // rather than re-fetched.
         counts.skipped++;
         if (!gate) continue;
-        readStatus = storedStatus(storedPath);
+        // A stored path whose file is gone is an advert nobody read, not a
+        // board description: null would let the route pass it as `standard`.
+        readStatus = storedStatus(storedPath) ?? 'unreadable';
         if (readStatus === 'read') {
           try {
             text = storedText(storedPath) || '';
@@ -3225,6 +3400,7 @@ export async function readPipelineAdverts({
         description: text,
         matchedKeywords: matchedTitleKeywords(identity.title, titleFilterConfig),
         readStatus,
+        location: identity.location,
       });
       if (verdict.drop) {
         const row = {
@@ -3245,10 +3421,19 @@ export async function readPipelineAdverts({
       // Only for a row this pass actually read: an unread advert has no verdict
       // to write, and clearing a label the reader wrote on a better day would
       // lose the only thing the queue knows about its years bar.
-      if (!verdict.unread) workingLine = insertYearsSegment(workingLine, verdict.years ?? null);
-      const routing = routeDetail(identity.company, tiersTable, identity.note);
+      if (!verdict.unread) {
+        workingLine = insertYearsSegment(workingLine, verdict.years ?? null);
+        workingLine = insertLocationSegment(workingLine, verdict.location ?? null);
+      }
+      const routing = routeDetail(identity.company, tiersTable, identity.note, readStatus);
       countRoute(counts.routed, routing);
       lines[i] = insertRouteSegment(workingLine, routing.route);
+    }
+
+    for (const [i, line] of before) {
+      if (movedOut.has(i)) continue;
+      if (lines[i] === line) counts.unchanged++;
+      else counts.changed++;
     }
 
     if (movedOut.size > 0) {
@@ -3269,7 +3454,9 @@ export async function readPipelineAdverts({
       return;
     }
 
-    atomicWriteFile(pipelinePath, lines.join('\n'));
+    // A run that changed no line leaves the file alone, modified time and all,
+    // so a second run over the same queue is visibly a no-op.
+    if (counts.changed > 0) atomicWriteFile(pipelinePath, lines.join('\n'));
   });
 
   return counts;
@@ -4098,7 +4285,9 @@ async function main() {
     for (const line of formatReadSummary(reader.tally, { firecrawlEnabled: reader.firecrawlEnabled })) {
       console.log(line);
     }
-    console.log(`Already labelled:      ${counts.skipped} ${counts.skipped === 1 ? 'row' : 'rows'} skipped`);
+    for (const line of formatRecheckSummary(counts)) {
+      console.log(line);
+    }
     if (gating) {
       if (counts.duplicates > 0) {
         console.log(`Already tracked:       ${counts.duplicates} moved to Processed`);
@@ -4445,6 +4634,7 @@ async function main() {
           description: job.description,
           matchedKeywords: matchedTitleKeywords(job.title, config.title_filter),
           readStatus: job.readStatus ?? null,
+          location: job.location,
         });
         if (verdict.drop) {
           // A years drop counts as a content drop in the per-source ledger and
@@ -4455,6 +4645,9 @@ async function main() {
           if (ledgerReason === 'content') totalFilteredContent++;
           else if (ledgerReason === 'countryEligibility') totalFilteredCountryEligibility++;
           else if (ledgerReason === 'visa') totalFilteredVisa++;
+          // A town outside London counts where the free location filter's
+          // drops count: same ledger key, same run total.
+          else if (ledgerReason === 'location') totalFilteredLocation++;
           sourceLedger.drop(company.name, ledgerReason);
           countAdvertDrop(advertDrops, {
             company: job.company || company.name || '',
@@ -4467,6 +4660,7 @@ async function main() {
           continue;
         }
         if (verdict.years) job.years = verdict.years;
+        if (verdict.location) job.locationLabel = verdict.location;
         const dedupUrl = normalizeUrlForDedup(job.url);
         if (seenUrls.has(dedupUrl)) {
           totalDupes++;
@@ -4497,9 +4691,10 @@ async function main() {
         // as broad-discovery — ineligible for the fallback, per the issue scope.
         const careersUrlDomain = extractCareersUrlDomain(company.careers_url);
         // The route, decided before any evaluation token is spent. It rides the
-        // queue line as `route: score` or `route: standard`; it never decides
-        // whether the advert is read, which is free and has already happened.
-        const routing = routeDetail(job.company || company.name || '', tiersTable, job.note || '');
+        // queue line as `route: score` or `route: standard`, or `route: review`
+        // when nobody could read the advert; it never decides whether the
+        // advert is read, which is free and has already happened.
+        const routing = routeDetail(job.company || company.name || '', tiersTable, job.note || '', job.readStatus ?? null);
         countRoute(routeTally, routing);
         job.route = routing.route;
         sourceLedger.keep(company.name);

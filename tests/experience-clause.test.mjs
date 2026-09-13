@@ -515,6 +515,28 @@ function only(label, text) {
 }
 
 {
+  // Hogan Lovells (build review of Cb, fix 3): the wish is the last word of the
+  // sentence, so it can describe nothing but the years, however far away it is.
+  const hogan = only('Hogan Lovells', 'What you will bring: 7+ years of relevant experience within legal / professional services preferred. You will manage a team of analysts.');
+  if (hogan) {
+    eq('Hogan Lovells: minimum seven', hogan.minimum, 7);
+    eq('Hogan Lovells: a sentence ending on "preferred" is not a bar', hogan.mandatory, false);
+  }
+  eq('Hogan Lovells: nothing binds', binding('7+ years of relevant experience within legal / professional services preferred.').length, 0);
+  eq('"desirable" ending the sentence is a wish too',
+    only('desirable', '5+ years of experience in a regulated financial services environment is desirable.')?.mandatory, false);
+  eq('"nice to have" ending the sentence is a wish too',
+    only('nice to have', '6 years of experience leading marketplace operations teams across Europe, nice to have!')?.mandatory, false);
+  // Retention: a wish that carries on still keeps the 25-character reach.
+  eq('a wish that continues past the sentence end does not withdraw the bar',
+    only('continuing', '5+ years of experience in revenue operations, ideally in SaaS.')?.mandatory !== false, true);
+  eq('nor does a wish in the next sentence',
+    only('next sentence', 'You need 5+ years of experience in legal operations. A law degree is preferred.')?.mandatory, true);
+  eq('nor a wish ending the other half of a semicolon',
+    only('semicolon', '5+ years of experience in legal operations is required; a law degree is preferred.')?.mandatory, true);
+}
+
+{
   // Amazon: the same word before the clause, where it does govern it.
   const c = only('Amazon', 'Preferred Qualifications - 7+ years of product or program management experience.');
   if (c) eq('Amazon: a "Preferred Qualifications" header is a wish, not a bar', c.mandatory, false);

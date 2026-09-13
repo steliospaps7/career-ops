@@ -170,7 +170,8 @@ function readerFor(map) {
   });
   const out = sections(readFileSync(p, 'utf-8'));
   eq('the unreadable row stays pending', out.pending.length, 1);
-  eq('it is still routed', extractRouteSegment(out.pending[0]), 'standard');
+  // Ticket C, C2: an advert nobody read is routed to review, never standard.
+  eq('it is routed to review', extractRouteSegment(out.pending[0]), 'review');
   eq('it is not dropped', counts.drops.total, 0);
   eq('it is listed for a manual read', counts.unreadableRows.length, 1);
   eq('and counted against the residue', counts.firecrawlResidue, 1);

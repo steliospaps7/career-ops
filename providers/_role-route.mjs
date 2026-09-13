@@ -4,8 +4,10 @@
  * A queued role is labelled `route: score` or `route: standard` before any
  * evaluation token is spent. Tier 1, tier 2 and flagged roles wait for
  * Stelios's Evaluate; everything else gets the standard CV and the basic
- * answers with no evaluation. The fit gate runs on both routes — the route
- * decides what an application costs, never whether the advert is read.
+ * answers with no evaluation. A role whose advert nobody read is
+ * `route: review` instead, and waits for a person to read it (ticket C, C2).
+ * The fit gate runs on both routes — the route decides what an application
+ * costs, never whether the advert is read.
  *
  * Pure by design, so a change to the tier rule is a one-line edit with a test.
  * The tier table is `data/companies.tsv`, which belongs to the Tiers chat: this
@@ -113,17 +115,25 @@ export function loadTiersTable(tiersPath) {
  * for, so `dream` scores. Every other value the column carries (`out`,
  * `unread`, empty, a name not in the table) is untiered and routes standard.
  *
+ * An advert nobody read comes first (ticket C, C2): whatever the tier, it is
+ * `review`, because a person reads it before anything is sent. `standard`
+ * would send the standard pack on an empty description, and `score` would
+ * spend an evaluation on one. A row with no read status at all, which is a
+ * board that handed over its own description, routes on its tier as before.
+ *
  * @param {string} companyName - Company as the queue line or the board names it.
  * @param {Map<string, {tier: string, notes: string}>} tiersTable
  * @param {string} [lineNote] - The queue line's own note text.
- * @returns {{route: 'score'|'standard', bucket: string, tier: string}}
+ * @param {string|null} [readStatus] - The stored advert's read status, or null.
+ * @returns {{route: 'score'|'standard'|'review', bucket: string, tier: string}}
  */
-export function routeDetail(companyName, tiersTable, lineNote = '') {
+export function routeDetail(companyName, tiersTable, lineNote = '', readStatus = null) {
   const entry = tiersTable instanceof Map
     ? tiersTable.get(canonicalTierName(companyName))
     : null;
   const tier = entry ? String(entry.tier ?? '').trim().toLowerCase() : '';
 
+  if (readStatus != null && readStatus !== 'read') return { route: 'review', bucket: 'unread', tier };
   if (tier === '1') return { route: 'score', bucket: 'tier1', tier };
   if (tier === '2') return { route: 'score', bucket: 'tier2', tier };
   if (tier === 'dream') return { route: 'score', bucket: 'dream', tier };
@@ -137,16 +147,17 @@ export function routeDetail(companyName, tiersTable, lineNote = '') {
 /**
  * The route alone, which is what rides the queue line as `route: <value>`.
  *
- * @returns {'score'|'standard'}
+ * @returns {'score'|'standard'|'review'}
  */
-export function routeByTier(companyName, tiersTable, lineNote = '') {
-  return routeDetail(companyName, tiersTable, lineNote).route;
+export function routeByTier(companyName, tiersTable, lineNote = '', readStatus = null) {
+  return routeDetail(companyName, tiersTable, lineNote, readStatus).route;
 }
 
 /** The buckets, in the order the summary prints them. */
 export const ROUTE_BUCKETS = {
   score: ['tier1', 'tier2', 'dream', 'flagged'],
   standard: ['tier3', 'untiered'],
+  review: ['unread'],
 };
 
 export const ROUTE_BUCKET_LABELS = {
@@ -156,4 +167,5 @@ export const ROUTE_BUCKET_LABELS = {
   flagged: 'flagged',
   tier3: 'tier 3',
   untiered: 'untiered',
+  unread: 'unread',
 };
