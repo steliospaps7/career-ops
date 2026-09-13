@@ -161,6 +161,16 @@ const CUE_REACH = 70;
  */
 const TRAILING_WISH_REACH = 25;
 
+/**
+ * A wish that is the last word of the clause's sentence governs the years,
+ * however far from the number it sits. Hogan Lovells' "7+ years of relevant
+ * experience within legal / professional services preferred." ends on the
+ * wish, so nothing follows for it to describe. A wish that carries on ("ideally
+ * in SaaS", Cresta's "ideally supporting a B2B SaaS company") keeps the reach
+ * above. Only a real sentence end counts, never the window's edge.
+ */
+const ENDING_WISH_RE = /\b(?:preferred|desirable|nice[\s-]to[\s-]have)[^a-z0-9]*$/;
+
 const MANDATORY_CUES = [
   'must have', 'must', 'required', 'requires', 'require', 'requirement',
   'at least', 'minimum', 'a minimum of', 'need', 'needs', 'essential',
@@ -409,6 +419,7 @@ export function extractExperienceClauses(text) {
     const at = m.index - from;
     const end = at + m[0].trimEnd().length;
     let mandatory = readMandatory(window, at, end);
+    if (!bounds.clippedEnd && ENDING_WISH_RE.test(lower.slice(m.index + m[0].length, bounds.end))) mandatory = false;
     // The clause's sentence starts at or before the withdrawal exactly when no
     // sentence ends between the two.
     if (withdrawal !== -1 && m.index < withdrawalEnd) mandatory = false;
