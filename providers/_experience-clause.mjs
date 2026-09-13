@@ -57,9 +57,14 @@ const OR_MORE = '(?:\\s*or\\s+(?:more|above|greater|over))?';
  * number, then "year", "years", "yr" or "yrs", and an optional trailing "+"
  * for the "5 years+" form. "or more" and "more than" need no pattern of their
  * own — they change nothing about the lower bound this reads.
+ *
+ * The leading `\b` stops the number starting inside a word or a longer number:
+ * without it "everyone years of experience" read a minimum of one, from the
+ * "one" in "everyone", and "founded in 1995 years of experience" read
+ * ninety-five and dropped the row.
  */
 const CLAUSE_RE = new RegExp(
-  `(${NUMBER})\\s*\\+?\\s*(?:${RANGE}\\s*(?:${NUMBER})\\s*\\+?\\s*)?${OR_MORE}\\s*(?:years?|yrs?)\\b\\s*\\+?`,
+  `\\b(${NUMBER})\\s*\\+?\\s*(?:${RANGE}\\s*(?:${NUMBER})\\s*\\+?\\s*)?${OR_MORE}\\s*(?:years?|yrs?)\\b\\s*\\+?`,
   'gi',
 );
 
@@ -88,8 +93,16 @@ const EXPERIENCE_RE = /experien|background|track record|in a similar role|tenure
  * 60 years of attitude and heritage" — and admitting it dropped three real
  * stored adverts on the employer's history, which is the very thing finding A04
  * is about. "5 years of experience" still reads, through the word cue above.
+ *
+ * Three more shapes, since relevance reads only the clause's own sentence and
+ * a bar can no longer borrow "experience" from a neighbour. Each is from a
+ * stored advert that lost its bar without it: "5+ years in a senior management
+ * role" and "5+ years as a Programme Manager" (an article, but not "in a row"),
+ * "Five or more years driving product" and "8+ years shipping complex
+ * software" (a verb in -ing, but not "5 years running"), and "6-10 years post
+ * undergrad".
  */
-const DOMAIN_RE = /^\s*(?:in|within|as|working)\s+(?!the\b|a\b|an\b|this\b|that\b|these\b|our\b|their\b|its\b|last\b|past\b|recent\b|order\b)[a-z]/i;
+const DOMAIN_RE = /^\s*(?:(?:in|within|as|working)\s+(?!the\b|a\b|an\b|this\b|that\b|these\b|our\b|their\b|its\b|last\b|past\b|recent\b|order\b)[a-z]|(?:in|as)\s+an?\s+(?!row\b)[a-z]|(?!running\b)[a-z]+ing\b|post[\s-]+[a-z])/i;
 
 /**
  * Sentences that carry a years number and are plainly not about the reader's
@@ -109,13 +122,14 @@ const NOT_EXPERIENCE_RE = /\byears?\s+(?:old\b|or older\b|of age\b)|sabbatical|\
 const WINDOW_BEFORE = 110;
 const WINDOW_AFTER = 130;
 
-/** The relevance window is NOT clipped to the sentence, because the word
- * "experience" is often in the neighbouring clause: the audit's own T12 reads
- * "You need two years of experience; 5+ years is preferred, not required", and
- * the second half carries the bar without carrying the word. Kept close so
- * Greenhouse's disability form — "we need to ask this question at least every
- * five years" — still reaches nothing. */
-const RELEVANCE_WINDOW = 150;
+/** A sentence ends at a full stop, a question mark, an exclamation mark or a
+ * semicolon. A statement ignores the semicolon. The cues and the exclusion
+ * read the sentence, because a preference in one half of a semicolon does not
+ * answer for the other. Relevance reads the statement, because the audit's own
+ * T12 is "You need two years of experience; 5+ years is preferred, not
+ * required", and the second half carries the bar without carrying the word. */
+const SENTENCE_END = /[.!?;]/;
+const STATEMENT_END = /[.!?]/;
 
 /** The quoted sentence is read by a person on a DROP line, so it is capped. */
 const SENTENCE_CAP = 240;
@@ -191,6 +205,12 @@ const COMPANY_CUES = [
   // "5+ years experience in business operations", and the short form read that
   // requirement as the employer's own age and would have kept the row.
   'been in business', 'in business for', 'in business since',
+  // A company spending its years doing something, which the -ing shape in
+  // DOMAIN_RE would otherwise read as a bar: Kraken's "has spent the last 15
+  // years building" and Reynolds' "we’ve spent over 80 years sourcing", whose
+  // curly apostrophe the straight "we've" above does not match. "has spent"
+  // and not "spent": "You've spent 2 to 3 years" is the reader.
+  'has spent', 'we’ve',
 ];
 
 function toNumber(token) {
@@ -282,42 +302,63 @@ function readSubject(window, at, end) {
  * inside what comes back: a cut needs its sentence quoted, and a quote that
  * had lost the number would prove nothing.
  */
-function quote(text, sentenceStart, sentenceEnd, matchStart, matchEnd) {
-  let from = Math.max(sentenceStart, matchStart - WINDOW_BEFORE);
-  let to = Math.min(sentenceEnd, matchEnd + WINDOW_AFTER);
+function quote(text, bounds, matchStart, matchEnd) {
+  let from = Math.max(bounds.start, matchStart - WINDOW_BEFORE);
+  let to = Math.min(bounds.end, matchEnd + WINDOW_AFTER);
   if (to - from > SENTENCE_CAP) {
     const slack = Math.max(0, SENTENCE_CAP - (matchEnd - matchStart));
     from = Math.max(from, matchStart - Math.floor(slack * 0.45));
     to = Math.min(to, from + SENTENCE_CAP);
   }
+  // A scan that stopped at the window's edge cut the sentence there, even
+  // though `from` sits exactly on that edge.
+  const cutBefore = from > bounds.start || bounds.clippedStart;
+  const cutAfter = to < bounds.end || bounds.clippedEnd;
   // Snap inwards to a word boundary so the quote never starts or ends mid-word.
-  if (from > sentenceStart) {
+  if (cutBefore) {
     const space = text.indexOf(' ', from);
     if (space !== -1 && space < matchStart) from = space + 1;
   }
-  if (to < sentenceEnd) {
+  if (cutAfter) {
     const space = text.lastIndexOf(' ', to);
     if (space > matchEnd) to = space;
   }
   let quoted = text.slice(from, to).trim();
-  if (from > sentenceStart) quoted = `\u2026${quoted}`;
-  if (to < sentenceEnd) quoted = `${quoted}\u2026`;
+  if (cutBefore) quoted = `\u2026${quoted}`;
+  if (cutAfter) quoted = `${quoted}\u2026`;
   return quoted;
 }
 
 /** Sentence boundaries in the collapsed text: a full stop, a question mark, an
  * exclamation mark or a semicolon followed by a space. A bullet block has none
- * of these, which is why the window above exists as well. */
-function sentenceBounds(text, at) {
-  let start = 0;
-  for (let i = at; i > 0; i--) {
-    if (/[.!?;]/.test(text[i - 1]) && (i >= text.length || /\s/.test(text[i]))) { start = i; break; }
+ * of these, which is why the window above exists as well.
+ *
+ * The scan goes no further than `floor` and `ceiling`. Unbounded, it ran to
+ * both ends of a punctuation-free advert once per clause, so the time grew with
+ * the square of the length: 915 seconds on the build review's 152 KB advert.
+ * Every caller clips to the window anyway, so the scan stops there too, and
+ * `clippedStart` / `clippedEnd` say an edge is the window's and not a real
+ * boundary. */
+function sentenceBounds(text, at, floor = 0, ceiling = text.length, ends = SENTENCE_END) {
+  let start = floor;
+  let clippedStart = floor > 0;
+  for (let i = at; i > 0 && i >= floor; i--) {
+    if (ends.test(text[i - 1]) && (i >= text.length || /\s/.test(text[i]))) {
+      start = i;
+      clippedStart = false;
+      break;
+    }
   }
-  let end = text.length;
-  for (let i = at; i < text.length; i++) {
-    if (/[.!?;]/.test(text[i]) && (i + 1 >= text.length || /\s/.test(text[i + 1]))) { end = i + 1; break; }
+  let end = ceiling;
+  let clippedEnd = ceiling < text.length;
+  for (let i = at; i < ceiling; i++) {
+    if (ends.test(text[i]) && (i + 1 >= text.length || /\s/.test(text[i + 1]))) {
+      end = i + 1;
+      clippedEnd = false;
+      break;
+    }
   }
-  return { start, end };
+  return { start, end, clippedStart, clippedEnd };
 }
 
 /**
@@ -335,8 +376,11 @@ export function extractExperienceClauses(text) {
   const lower = flat.toLowerCase();
 
   // A withdrawal applies to the clauses before it and to its own sentence, so
-  // the earliest one is the only position that matters.
+  // the earliest one is the only position that matters. Its sentence's end is
+  // found once, unclipped, so a withdrawal further back than the window in the
+  // same unpunctuated block still reaches the clause.
   const withdrawal = lower.search(NOT_PRECLUDE_RE);
+  const withdrawalEnd = withdrawal === -1 ? -1 : sentenceBounds(flat, withdrawal).end;
 
   const clauses = [];
   const re = new RegExp(CLAUSE_RE.source, CLAUSE_RE.flags);
@@ -344,34 +388,36 @@ export function extractExperienceClauses(text) {
     const minimum = toNumber(m[1]);
     if (minimum == null) continue;
 
-    // Is this a years number about experience at all? Asked of a wider window
-    // than the cues below, and of the neighbouring text rather than only this
-    // sentence.
-    const near = lower.slice(
-      Math.max(0, m.index - RELEVANCE_WINDOW),
-      Math.min(lower.length, m.index + m[0].length + RELEVANCE_WINDOW),
-    );
-    const after = flat.slice(m.index + m[0].length, m.index + m[0].length + 24);
-    if (!EXPERIENCE_RE.test(near) && !DOMAIN_RE.test(after)) continue;
-    if (NOT_EXPERIENCE_RE.test(near)) continue;
-
-    // The cues and the quote come from the clause's own sentence, so a
-    // preference in one half of a semicolon does not answer for the other.
-    const bounds = sentenceBounds(flat, m.index);
+    // Everything below reads the clause's own sentence, never the text around
+    // it: a window that crossed a full stop let 9fin's sabbatical line suppress
+    // a real bar beside it, and let a company's growth figure borrow
+    // "experience" from the next sentence.
+    const floor = Math.max(0, m.index - WINDOW_BEFORE);
+    const ceiling = Math.min(flat.length, m.index + m[0].length + WINDOW_AFTER);
+    const bounds = sentenceBounds(flat, m.index, floor, ceiling);
     const from = Math.max(bounds.start, m.index - WINDOW_BEFORE);
     const to = Math.min(bounds.end, m.index + m[0].length + WINDOW_AFTER);
     const window = lower.slice(from, to);
 
+    // Is this a years number about experience at all?
+    const statement = sentenceBounds(flat, m.index, floor, ceiling, STATEMENT_END);
+    const relevant = lower.slice(statement.start, statement.end);
+    const after = flat.slice(m.index + m[0].length, m.index + m[0].length + 24);
+    if (!EXPERIENCE_RE.test(relevant) && !DOMAIN_RE.test(after)) continue;
+    if (NOT_EXPERIENCE_RE.test(window)) continue;
+
     const at = m.index - from;
     const end = at + m[0].trimEnd().length;
     let mandatory = readMandatory(window, at, end);
-    if (withdrawal !== -1 && withdrawal >= bounds.start) mandatory = false;
+    // The clause's sentence starts at or before the withdrawal exactly when no
+    // sentence ends between the two.
+    if (withdrawal !== -1 && m.index < withdrawalEnd) mandatory = false;
 
     clauses.push({
       minimum,
       mandatory,
       subject: readSubject(window, at, end),
-      sentence: quote(flat, bounds.start, bounds.end, m.index, m.index + m[0].length),
+      sentence: quote(flat, bounds, m.index, m.index + m[0].length),
     });
   }
   return clauses;

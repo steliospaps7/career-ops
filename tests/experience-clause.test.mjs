@@ -121,14 +121,19 @@ function only(label, text) {
 
 {
   // T13 — A04: company history is not candidate experience.
+  // "We have served customers for 5+ years." says nothing about experience in
+  // its own sentence, so since the build review's fix 3 it is not read as a
+  // clause at all; it used to borrow "experience" from the next sentence and
+  // was saved only by its company subject. The audit asks that T13 is not
+  // rejected on the five and that company age is not his experience; both
+  // hold. The company subject is proved in section 2, on a company sentence
+  // that does carry the word.
   const text = 'We have served customers for 5+ years. You need two years of experience.';
   const clauses = extractExperienceClauses(text);
-  eq('T13 reads both sentences', clauses.length, 2);
-  if (clauses.length === 2) {
-    eq('T13 the five-year clause is read', clauses[0].minimum, 5);
-    eq('T13 and attributed to the company, not to him', clauses[0].subject, 'company');
-    eq('T13 the two-year requirement is his', clauses[1].minimum, 2);
-    eq('T13 and is about the candidate', clauses[1].subject, 'candidate');
+  eq('T13 reads only the candidate sentence', clauses.length, 1);
+  if (clauses.length === 1) {
+    eq('T13 the two-year requirement is his', clauses[0].minimum, 2);
+    eq('T13 and is about the candidate', clauses[0].subject, 'candidate');
   }
   eq('T13 has no binding clause at five', binding(text).filter(c => c.minimum >= 5).length, 0);
 }
@@ -392,6 +397,18 @@ function only(label, text) {
   if (leaked === 0) pass(`none of the ${boilerplate.length} boilerplate sentences binds the row`);
 }
 
+{
+  // A number only starts at a word boundary. Without one the reader took the
+  // "one" out of "everyone" as a minimum of one, and the "95" out of 1995 as a
+  // minimum of ninety-five, which drops the row. The build review's two cases;
+  // its comma form of the second is kept as well, and it reads nothing either.
+  eq('the "one" inside "everyone" is not a number', extractExperienceClauses('everyone years of experience').length, 0);
+  eq('the "95" inside 1995 is not a number', extractExperienceClauses('founded in 1995 years of experience').length, 0);
+  eq('nor with a comma after the year', extractExperienceClauses('founded in 1995, years of experience').length, 0);
+  const c = only('a real number after a year', 'Founded in 1995, we need 3 years of experience.');
+  if (c) eq('a real number beside a year is still read', c.minimum, 3);
+}
+
 // ── 8. The module is pure, and survives what a real page hands it ────
 
 {
@@ -421,6 +438,41 @@ function only(label, text) {
     ok('the quoted sentence stays under 260 characters', c.sentence.length <= 260);
     ok('and still contains the clause', c.sentence.includes('8+ years'));
   }
+}
+
+{
+  // An advert with no full stop, question mark or semicolon anywhere. The
+  // sentence scan used to walk to both ends of the text for every clause, so
+  // the time grew with the square of the length: 11 seconds on this 152 KB
+  // string before the fix, and 915 seconds on the build review's real one.
+  // Every reader of the scan clips to the window anyway, so the scan now stops
+  // there too. The bound is generous; the fixed reader takes a fraction of it.
+  const long = '5 years of experience '.repeat(7000);
+  const started = Date.now();
+  const clauses = extractExperienceClauses(long);
+  const took = Date.now() - started;
+  ok(`a 152 KB advert with no punctuation is read in under 3 seconds (took ${took} ms)`, took < 3000);
+  eq('and every clause in it is still read', clauses.length, 7000);
+  ok('each quote still stays under the cap', clauses.every(c => c.sentence.length <= 260));
+  ok('and is marked as cut on both sides', clauses[3500].sentence.startsWith('…') && clauses[3500].sentence.endsWith('…'));
+}
+
+{
+  // The clip must not change what a punctuated advert quotes: a full stop just
+  // inside the window's edge is still found as the sentence's start.
+  const lead = 'x'.repeat(90);
+  const text = `${lead}. You must have 6+ years of experience.`;
+  const c = only('a boundary at the window edge', text);
+  if (c) eq('a sentence starting inside the window is quoted whole, with no ellipsis', c.sentence, 'You must have 6+ years of experience.');
+}
+
+{
+  // A withdrawal further back than the window, in the same unpunctuated block,
+  // still withdraws: it is measured against its own sentence, not the window.
+  const text = `The stated experience does not preclude applications from candidates with less ${'and we mean it '.repeat(12)}`
+    + 'you will have 6+ years of experience';
+  const c = only('a distant withdrawal', text);
+  if (c) eq('a withdrawal 180 characters back in the same sentence still applies', c.mandatory, false);
 }
 
 {
@@ -510,6 +562,58 @@ function only(label, text) {
     if (clauses.length > 0) { bound++; fail(`${label}: a non-experience sentence binds the row: ${JSON.stringify(clauses)}`); }
   }
   if (bound === 0) pass(`none of the ${notExperience.length} age, tenure, residency or loyalty sentences binds the row`);
+}
+
+{
+  // A real bar and a benefits line inside the same 150 characters. The
+  // relevance test and the exclusion used to read that whole window, so 9fin's
+  // sabbatical sentence suppressed a six-year bar beside it and a role the
+  // decision table puts out survived. Both now read the clause's own sentence.
+  // Both orders, and in each the bar binds while the benefit does not.
+  const bar = 'You must have 6+ years of experience in operations.';
+  const benefit = 'Work abroad for up to 3 months a year, 1 month paid sabbatical after 5 years of service, and experience days.';
+  for (const [label, text] of [['bar first', `${bar} ${benefit}`], ['benefit first', `${benefit} ${bar}`]]) {
+    eq(`${label}: the six-year bar binds and the sabbatical does not`, binding(text).map(c => c.minimum).join(), '6');
+  }
+}
+
+{
+  // The relevance half on its own: a company sentence with no experience word
+  // used to borrow "experience" from the next sentence, and with "you" close
+  // enough it bound the row at five.
+  const text = 'Revenue doubled every year for 5 years. You will need 2 years of experience.';
+  eq('a neighbouring sentence does not make a growth figure an experience clause', binding(text).map(c => c.minimum).join(), '2');
+}
+
+{
+  // The price of reading only the clause's own sentence: five stored adverts
+  // whose bar carries no "experience" of its own and had been borrowing it
+  // from a neighbour. Each shape is now read inside the sentence. Quoted from
+  // the files under `jds/`.
+  const shapes = [
+    ['Jonas, "in a" and a role', 'JOB QUALIFICATIONS: - 5+ years in a senior management or business leadership role within software.', 5],
+    ['Moneybox, "as a" and a role', 'This likely looks like 5+ years as a Programme Manager and 10+ years overall in change, transformation, data, AI, or engineering delivery.', 5],
+    ['SeedLegals, a verb in -ing', 'Five or more years driving product with engineers and designers.', 5],
+    ['Toast, a verb in -ing', '(Requirements) - ~8+ years shipping complex software products with demonstrated ownership of multi-team programs.', 8],
+    ['Entain, years after a degree', 'Ability to lead a team, ideally at a top tier consultancy (such as McKinsey, BCG, Bain, OW, Kearney) with 6-10 years post undergrad or more than 2-3 years post MBA.', 6],
+  ];
+  for (const [label, text, expected] of shapes) {
+    ok(`${label} is read as a bar at ${expected}`, binding(text).some(c => c.minimum === expected));
+  }
+  // And the look-alikes those shapes must not take in.
+  const notShapes = [
+    'Recognised as a Best Place to Work in Technology 3 years in a row.',
+    'Voted top employer for 5 years running.',
+  ];
+  for (const text of notShapes) eq(`not an experience clause: ${text}`, extractExperienceClauses(text).length, 0);
+  // The -ing shape also fits a company's own history, so these must stay the
+  // company's. Kraken's is in four stored adverts; Reynolds' uses a curly
+  // apostrophe, which the straight "we've" cue did not match.
+  const history = [
+    ['Kraken', 'Payward Services and CF Benchmarks - has spent the last 15 years building one of the most modern financial infrastructure platforms in the industry.'],
+    ['Reynolds', 'At Reynolds Food Group, we’ve spent over 80 years sourcing and supplying the freshest ingredients to the UK’s food service industry.'],
+  ];
+  for (const [label, text] of history) eq(`${label}: a company spending years doing something binds nothing`, binding(text).length, 0);
 }
 
 {

@@ -10,22 +10,24 @@
  * configuration change with no code behind it, so this file is the only place
  * the change is asserted.
  *
- * It runs twice. Against the real `portals.yml` when the checkout has one,
- * which is the file the scan actually reads; and against a fixture carrying the
- * same changed lines, which is what a fresh clone and CI can see — `portals.yml`
- * is user layer and gitignored, so an assertion that only ran against it would
- * prove nothing anywhere but this machine.
+ * It runs twice. Against a fixture object carrying the changed lines, and
+ * against a `portals.yml` written to a temp directory and parsed as YAML, the
+ * way the scan reads it. It never reads the live `portals.yml`: that file is
+ * user layer and gitignored, so an assertion on it proved nothing anywhere but
+ * this machine, and a hand edit to it could fail the suite (Ca build review,
+ * fix 5).
  *
  * Nothing here touches the network.
  *
  * Run: node test-all.mjs --only title-filter-gathers
  */
 
-import { existsSync, readFileSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
 import { join } from 'path';
 import * as yaml from 'js-yaml';
 import { buildTitleFilter } from '../scan.mjs';
-import { pass, fail, warn, ROOT } from './helpers.mjs';
+import { pass, fail } from './helpers.mjs';
 
 console.log('\nportals.yml — titles gather plausible roles, they do not certify a fit (C3)');
 
@@ -53,6 +55,14 @@ const STILL_CUT = [
   'Machine Learning Engineer',
   'Data Engineer',
   'Platform Engineer',
+  // Fix 5: the specialist engineering titles the bare word used to stop, with
+  // nothing in content_filter to stop them by the advert.
+  'Staff QA Automation Engineer',
+  'Test Engineer',
+  'Staff Engineer',
+  'SRE',
+  'DevOps Engineer',
+  'Site Reliability Engineer',
   'Account Executive',
   'Customer Success Manager',
   'Head of Product',
@@ -102,35 +112,45 @@ function check(label, titleFilter) {
 // Trimmed to what C3 touches plus the entries those changes could collide
 // with, so the assertions read as the rule rather than as a copy of the file.
 
-{
-  const fixture = {
-    positive: [
-      'Operations Associate', 'Business Operations', 'Growth Associate', 'Growth Manager',
-      'Growth Marketing Manager', 'Prompt Engineer',
-      'Chief of Staff', "Founder's Associate", 'Founders Associate',
-      'Strategy & Operations', 'Operations Manager',
-      'AI Operations', 'AI Product', 'Applied AI', 'Forward Deployed', 'Deployment Specialist',
-      'Product Manager', 'Product Owner', 'Partnerships Manager',
-    ],
-    negative: [
-      'Applied AI Engineer', 'Solution Engineer', 'Solutions Engineer', 'Forward Deployed Engineer',
-      'Developer', 'Architect', 'Scientist', 'Software Engineer', 'Backend', 'Machine Learning Engineer',
-      'Data Engineer', 'Platform Engineer',
-      'Account Executive', 'Account Manager', 'Customer Success Manager',
-      'Senior Product', 'Senior Operations Manager', 'Senior',
-      'Sr', 'Principal', 'Director', 'Head of', 'VP',
-    ],
-  };
-  check('fixture:', buildTitleFilter(fixture));
-}
+const fixture = {
+  positive: [
+    'Operations Associate', 'Business Operations', 'Growth Associate', 'Growth Manager',
+    'Growth Marketing Manager', 'Prompt Engineer',
+    'Chief of Staff', "Founder's Associate", 'Founders Associate',
+    'Strategy & Operations', 'Operations Manager',
+    'AI Operations', 'AI Product', 'Applied AI', 'Forward Deployed', 'Deployment Specialist',
+    'Product Manager', 'Product Owner', 'Partnerships Manager',
+  ],
+  negative: [
+    'Applied AI Engineer', 'Solution Engineer', 'Solutions Engineer', 'Forward Deployed Engineer',
+    'Developer', 'Architect', 'Scientist', 'Software Engineer', 'Backend', 'Machine Learning Engineer',
+    'Data Engineer', 'Platform Engineer',
+    'DevOps', 'Site Reliability', 'Automation Engineer', 'Test Engineer', 'Staff Engineer', 'SRE',
+    'Account Executive', 'Account Manager', 'Customer Success Manager',
+    'Senior Product', 'Senior Operations Manager', 'Senior',
+    'Sr', 'Principal', 'Director', 'Head of', 'VP',
+  ],
+};
+check('fixture:', buildTitleFilter(fixture));
 
-// ── 2. The real file, which is the one the scan reads ────────────────
+// ── 2. The same lines as a portals.yml, read the way the scan reads it ─
+// Written to a temp directory, never the live file, as
+// portals-search-queries-removed.test.mjs does.
+
+const PORTALS_YML = `title_filter:
+  positive:
+${fixture.positive.map(e => `    - ${JSON.stringify(e)}`).join('\n')}
+  negative:
+${fixture.negative.map(e => `    - ${JSON.stringify(e)}`).join('\n')}
+content_filter:
+  negative: []
+`;
 
 {
-  const portals = join(ROOT, 'portals.yml');
-  if (!existsSync(portals)) {
-    warn('portals.yml is user layer and absent here — the real-file half of C3 was not asserted');
-  } else {
+  const dir = mkdtempSync(join(tmpdir(), 'portals-title-gathers-'));
+  try {
+    const portals = join(dir, 'portals.yml');
+    writeFileSync(portals, PORTALS_YML);
     const config = yaml.load(readFileSync(portals, 'utf-8'));
     const titleFilter = buildTitleFilter(config?.title_filter);
     check('portals.yml:', titleFilter);
@@ -163,5 +183,16 @@ function check(label, titleFilter) {
     const years = content.filter(e => /\d|one|two|three|four|five|six|seven|eight|nine|ten/i.test(e) && /year|yr/i.test(e));
     if (years.length === 0) pass('and content_filter carries no years phrases — the reader has them now');
     else fail(`content_filter still carries ${years.length} years phrases: ${years.slice(0, 3).join(', ')}…`);
+
+    // Fix 5: the specialist engineering backstop is on the title list, and
+    // content_filter stays empty.
+    const specialist = ['Automation Engineer', 'Test Engineer', 'Staff Engineer', 'DevOps', 'SRE', 'Site Reliability'];
+    const absent = specialist.filter(f => !has(negative, f));
+    if (absent.length === 0) pass('the six specialist engineering forms are title negatives');
+    else fail(`missing specialist engineering negatives: ${absent.join(', ')}`);
+    if (content.length === 0) pass('and nothing was put into content_filter.negative');
+    else fail(`content_filter.negative is not empty: ${content.join(', ')}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 }
