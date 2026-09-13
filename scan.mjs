@@ -2923,7 +2923,58 @@ export function buildAdvertReader({
     return { ...outcome, jdPath: saved.path, reused: false };
   }
 
-  return { read, tally, firecrawlEnabled };
+  /**
+   * The stored advert for a row that arrived with its own, or null. Never
+   * fetches.
+   *
+   * The apify plugin caches the advert under `jds/` under the same filename
+   * this store uses and puts the same text on `description`, so the row is
+   * pointed at that file and counted where a stored read is counted. Only a
+   * `read` file is named: the gate reads the row's description, and a `jd:`
+   * segment naming a stub would send triage to empty text.
+   */
+  function attachStored({ url, company, title, location }) {
+    const identity = { url, company: company || '', title: title || '', location: location || '' };
+    const existing = findAdvert(identity, { jdsDir });
+    if (!existing || existing.status !== 'read') return null;
+    tally.considered++;
+    tally.reused++;
+    tally.read++;
+    const rung = existing.rung && tally.rungs[existing.rung] != null ? existing.rung : 'stored';
+    tally.rungs[rung]++;
+    return { status: 'read', rung: existing.rung, jdPath: existing.path, reused: true, reachedFirecrawl: false };
+  }
+
+  return { read, attachStored, tally, firecrawlEnabled };
+}
+
+/**
+ * The sweep's read step for one job that survived the free filters.
+ *
+ * A job with no description goes down the ladder, and its text, stored path
+ * and read status land on the job. A job that already carries its advert is
+ * never fetched; when the store holds that advert (the apify plugin's cache)
+ * the job is pointed at it, so the queue line gets its `jd:` segment.
+ *
+ * @returns {Promise<object|null>} The ladder's outcome, or null when no read ran.
+ */
+export async function fillJobAdvert(job, reader, companyName = '') {
+  const entry = {
+    url: job.url,
+    company: job.company || companyName || '',
+    title: job.title,
+    location: job.location,
+  };
+  if (hasAdvertText(job.description)) {
+    const stored = reader.attachStored(entry);
+    if (stored) job.jdPath = stored.jdPath;
+    return null;
+  }
+  const outcome = await reader.read(entry);
+  if (outcome.jdPath) job.jdPath = outcome.jdPath;
+  job.readStatus = outcome.status;
+  if (outcome.status === 'read' && outcome.text) job.description = outcome.text;
+  return outcome;
 }
 
 /**
@@ -3102,9 +3153,23 @@ export async function readPipelineAdverts({
       // than a `jd:` segment. Without this it has no advert, no filter and no
       // route at all, which is three lines of today's queue passing the gate
       // untouched.
-      const storedPath = extractJdSegment(line) || identity.localPath || '';
+      //
+      // Before B3 reached the fork, the free reader was handed that `local:`
+      // cell as a URL and stored an empty stub marked unreadable, so most such
+      // lines also carry a `jd:` segment naming the stub. The plugin's file is
+      // the advert: it wins whenever the segment's file is not `read` and the
+      // plugin's file exists. storedState reads the plugin's file, which has no
+      // read_status line, as `read`, so `--reread` does not send the line down
+      // the fetch branch, where a `local:` line has no URL and is skipped.
+      const jdSegment = extractJdSegment(line);
+      const preferLocal = Boolean(jdSegment && identity.localPath)
+        && storedStatus(jdSegment) !== 'read'
+        && storedStatus(identity.localPath) != null;
+      const storedPath = (preferLocal ? identity.localPath : jdSegment || identity.localPath) || '';
       const alreadyRead = Boolean(storedPath) && !(reread && storedStatus(storedPath) !== 'read');
-      let workingLine = line;
+      // The segment is pointed at the file the gate reads, so triage, which
+      // follows `jd:` and does not fetch, reads the advert and not the stub.
+      let workingLine = preferLocal ? line.replace(JD_SEGMENT_RE, `| jd: local:${storedPath}`) : line;
       let readStatus = null;
       let text = '';
       let jdPath = storedPath || '';
@@ -4363,21 +4428,13 @@ async function main() {
         // queue. It fills job.description and the three filters below run
         // unchanged. A row it cannot read is kept, labelled and listed — never
         // dropped on an advert nobody read, and never passed on an empty one.
-        if (!hasAdvertText(job.description)) {
-          const outcome = await advertReader.read({
-            url: job.url,
-            company: job.company || company.name || '',
-            title: job.title,
-            location: job.location,
-          });
-          if (outcome.jdPath) job.jdPath = outcome.jdPath;
-          job.readStatus = outcome.status;
-          if (advertReadDropsRow(outcome.status)) {
-            totalFilteredAdvertExpired++;
-            sourceLedger.drop(company.name, 'advertExpired');
-            continue;
-          }
-          if (outcome.status === 'read' && outcome.text) job.description = outcome.text;
+        // A row that arrived with its advert (the apify plugin's) is not
+        // fetched; it is pointed at the plugin's stored file instead.
+        const readOutcome = await fillJobAdvert(job, advertReader, company.name);
+        if (readOutcome && advertReadDropsRow(readOutcome.status)) {
+          totalFilteredAdvertExpired++;
+          sourceLedger.drop(company.name, 'advertExpired');
+          continue;
         }
         // ── The gate (ticket B2) ─────────────────────────────────
         // One rule, shared with the standalone pass, so the two cannot drift.
