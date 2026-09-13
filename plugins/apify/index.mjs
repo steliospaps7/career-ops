@@ -215,11 +215,12 @@ export default {
           if (!descriptionBody || descriptionBody.length < MIN_JD_BODY_CHARS) {
             return normalized;
           }
-          const remoteUrl = normalized.url;
+          // Job.url is the dedup key and must stay the posting URL; the text goes
+          // in Job.description (read by content_filter) and the cache reference
+          // rides as a note, in the `local:jds/` form the modes already read.
+          normalized.description = descriptionBody;
           const jdPath = saveJd(normalized, descriptionBody, sourceLabel);
-          if (jdPath === null) return normalized;
-          normalized.url = `local:${jdPath}`;
-          normalized._remote_url = remoteUrl;
+          if (jdPath !== null) normalized.note = `local:${jdPath}`;
           return normalized;
         })
         .filter(j => j && j.title && j.url);
