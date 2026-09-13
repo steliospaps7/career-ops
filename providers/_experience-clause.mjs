@@ -287,42 +287,63 @@ function readSubject(window, at, end) {
  * inside what comes back: a cut needs its sentence quoted, and a quote that
  * had lost the number would prove nothing.
  */
-function quote(text, sentenceStart, sentenceEnd, matchStart, matchEnd) {
-  let from = Math.max(sentenceStart, matchStart - WINDOW_BEFORE);
-  let to = Math.min(sentenceEnd, matchEnd + WINDOW_AFTER);
+function quote(text, bounds, matchStart, matchEnd) {
+  let from = Math.max(bounds.start, matchStart - WINDOW_BEFORE);
+  let to = Math.min(bounds.end, matchEnd + WINDOW_AFTER);
   if (to - from > SENTENCE_CAP) {
     const slack = Math.max(0, SENTENCE_CAP - (matchEnd - matchStart));
     from = Math.max(from, matchStart - Math.floor(slack * 0.45));
     to = Math.min(to, from + SENTENCE_CAP);
   }
+  // A scan that stopped at the window's edge cut the sentence there, even
+  // though `from` sits exactly on that edge.
+  const cutBefore = from > bounds.start || bounds.clippedStart;
+  const cutAfter = to < bounds.end || bounds.clippedEnd;
   // Snap inwards to a word boundary so the quote never starts or ends mid-word.
-  if (from > sentenceStart) {
+  if (cutBefore) {
     const space = text.indexOf(' ', from);
     if (space !== -1 && space < matchStart) from = space + 1;
   }
-  if (to < sentenceEnd) {
+  if (cutAfter) {
     const space = text.lastIndexOf(' ', to);
     if (space > matchEnd) to = space;
   }
   let quoted = text.slice(from, to).trim();
-  if (from > sentenceStart) quoted = `\u2026${quoted}`;
-  if (to < sentenceEnd) quoted = `${quoted}\u2026`;
+  if (cutBefore) quoted = `\u2026${quoted}`;
+  if (cutAfter) quoted = `${quoted}\u2026`;
   return quoted;
 }
 
 /** Sentence boundaries in the collapsed text: a full stop, a question mark, an
  * exclamation mark or a semicolon followed by a space. A bullet block has none
- * of these, which is why the window above exists as well. */
-function sentenceBounds(text, at) {
-  let start = 0;
-  for (let i = at; i > 0; i--) {
-    if (/[.!?;]/.test(text[i - 1]) && (i >= text.length || /\s/.test(text[i]))) { start = i; break; }
+ * of these, which is why the window above exists as well.
+ *
+ * The scan goes no further than `floor` and `ceiling`. Unbounded, it ran to
+ * both ends of a punctuation-free advert once per clause, so the time grew with
+ * the square of the length: 915 seconds on the build review's 152 KB advert.
+ * Every caller clips to the window anyway, so the scan stops there too, and
+ * `clippedStart` / `clippedEnd` say an edge is the window's and not a real
+ * boundary. */
+function sentenceBounds(text, at, floor = 0, ceiling = text.length) {
+  let start = floor;
+  let clippedStart = floor > 0;
+  for (let i = at; i > 0 && i >= floor; i--) {
+    if (/[.!?;]/.test(text[i - 1]) && (i >= text.length || /\s/.test(text[i]))) {
+      start = i;
+      clippedStart = false;
+      break;
+    }
   }
-  let end = text.length;
-  for (let i = at; i < text.length; i++) {
-    if (/[.!?;]/.test(text[i]) && (i + 1 >= text.length || /\s/.test(text[i + 1]))) { end = i + 1; break; }
+  let end = ceiling;
+  let clippedEnd = ceiling < text.length;
+  for (let i = at; i < ceiling; i++) {
+    if (/[.!?;]/.test(text[i]) && (i + 1 >= text.length || /\s/.test(text[i + 1]))) {
+      end = i + 1;
+      clippedEnd = false;
+      break;
+    }
   }
-  return { start, end };
+  return { start, end, clippedStart, clippedEnd };
 }
 
 /**
@@ -340,8 +361,11 @@ export function extractExperienceClauses(text) {
   const lower = flat.toLowerCase();
 
   // A withdrawal applies to the clauses before it and to its own sentence, so
-  // the earliest one is the only position that matters.
+  // the earliest one is the only position that matters. Its sentence's end is
+  // found once, unclipped, so a withdrawal further back than the window in the
+  // same unpunctuated block still reaches the clause.
   const withdrawal = lower.search(NOT_PRECLUDE_RE);
+  const withdrawalEnd = withdrawal === -1 ? -1 : sentenceBounds(flat, withdrawal).end;
 
   const clauses = [];
   const re = new RegExp(CLAUSE_RE.source, CLAUSE_RE.flags);
@@ -362,7 +386,12 @@ export function extractExperienceClauses(text) {
 
     // The cues and the quote come from the clause's own sentence, so a
     // preference in one half of a semicolon does not answer for the other.
-    const bounds = sentenceBounds(flat, m.index);
+    const bounds = sentenceBounds(
+      flat,
+      m.index,
+      Math.max(0, m.index - WINDOW_BEFORE),
+      Math.min(flat.length, m.index + m[0].length + WINDOW_AFTER),
+    );
     const from = Math.max(bounds.start, m.index - WINDOW_BEFORE);
     const to = Math.min(bounds.end, m.index + m[0].length + WINDOW_AFTER);
     const window = lower.slice(from, to);
@@ -370,13 +399,15 @@ export function extractExperienceClauses(text) {
     const at = m.index - from;
     const end = at + m[0].trimEnd().length;
     let mandatory = readMandatory(window, at, end);
-    if (withdrawal !== -1 && withdrawal >= bounds.start) mandatory = false;
+    // The clause's sentence starts at or before the withdrawal exactly when no
+    // sentence ends between the two.
+    if (withdrawal !== -1 && m.index < withdrawalEnd) mandatory = false;
 
     clauses.push({
       minimum,
       mandatory,
       subject: readSubject(window, at, end),
-      sentence: quote(flat, bounds.start, bounds.end, m.index, m.index + m[0].length),
+      sentence: quote(flat, bounds, m.index, m.index + m[0].length),
     });
   }
   return clauses;

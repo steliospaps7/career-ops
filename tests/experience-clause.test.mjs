@@ -436,6 +436,41 @@ function only(label, text) {
 }
 
 {
+  // An advert with no full stop, question mark or semicolon anywhere. The
+  // sentence scan used to walk to both ends of the text for every clause, so
+  // the time grew with the square of the length: 11 seconds on this 152 KB
+  // string before the fix, and 915 seconds on the build review's real one.
+  // Every reader of the scan clips to the window anyway, so the scan now stops
+  // there too. The bound is generous; the fixed reader takes a fraction of it.
+  const long = '5 years of experience '.repeat(7000);
+  const started = Date.now();
+  const clauses = extractExperienceClauses(long);
+  const took = Date.now() - started;
+  ok(`a 152 KB advert with no punctuation is read in under 3 seconds (took ${took} ms)`, took < 3000);
+  eq('and every clause in it is still read', clauses.length, 7000);
+  ok('each quote still stays under the cap', clauses.every(c => c.sentence.length <= 260));
+  ok('and is marked as cut on both sides', clauses[3500].sentence.startsWith('…') && clauses[3500].sentence.endsWith('…'));
+}
+
+{
+  // The clip must not change what a punctuated advert quotes: a full stop just
+  // inside the window's edge is still found as the sentence's start.
+  const lead = 'x'.repeat(90);
+  const text = `${lead}. You must have 6+ years of experience.`;
+  const c = only('a boundary at the window edge', text);
+  if (c) eq('a sentence starting inside the window is quoted whole, with no ellipsis', c.sentence, 'You must have 6+ years of experience.');
+}
+
+{
+  // A withdrawal further back than the window, in the same unpunctuated block,
+  // still withdraws: it is measured against its own sentence, not the window.
+  const text = `The stated experience does not preclude applications from candidates with less ${'and we mean it '.repeat(12)}`
+    + 'you will have 6+ years of experience';
+  const c = only('a distant withdrawal', text);
+  if (c) eq('a withdrawal 180 characters back in the same sentence still applies', c.mandatory, false);
+}
+
+{
   // Newlines and tabs are what the stored file actually carries.
   const c = only('across a newline', 'Requirements\n\nYou must have 6+ years\tof experience.\n');
   if (c) {
