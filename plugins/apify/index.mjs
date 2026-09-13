@@ -5,8 +5,9 @@
 // seeds take only security/compat fixes — feature work happens in the successor repo.
 //
 // Apify provider plugin — runs any Apify actor and maps its dataset items to
-// the {title, url, company, location} Job shape the scanner expects. All
-// variation (which actor, what input, how to read fields) lives in portals.yml.
+// the {title, url, company, location} Job shape the scanner expects, plus
+// description, note (the local:jds/ cache reference) and postedAt when the
+// field_map asks for them. All variation (which actor, what input, how to read fields) lives in portals.yml.
 //
 // Ported from the generic Apify provider contributed by @ageem23 in #693 (with
 // thanks); it also homes the LinkedIn-via-Apify use case from #791/#1202. As a
@@ -56,6 +57,31 @@ function pickField(item, spec) {
 }
 
 const ALLOWED_DEFAULT_KEYS = new Set(['title', 'url', 'company', 'location']);
+
+const MIN_POSTED_AT_MS = Date.UTC(2000, 0, 1);
+const MAX_POSTED_AT_SKEW_MS = 24 * 60 * 60 * 1000;
+// Below this a number is epoch seconds (1e11 s is the year 5138); at or above
+// it, epoch milliseconds (1e11 ms is March 1973).
+const EPOCH_SECONDS_LIMIT = 1e11;
+
+// Job.postedAt is epoch ms. Accept a finite number (epoch seconds or ms, told
+// apart by magnitude) or an absolute date string. Return null for anything
+// else, before 2000, or more than a day ahead: an omitted date is better than a
+// wrong one. Date.parse reads loose text ("not a date 5" is May 2001), so a
+// string must carry a four-digit year and at least one other number; relative
+// English ("3 days ago") is not read.
+export function parsePostedAt(value, now = Date.now()) {
+  let ms = null;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    ms = Math.abs(value) < EPOCH_SECONDS_LIMIT ? value * 1000 : value;
+  } else if (typeof value === 'string') {
+    const s = value.trim();
+    if (/\b(?:19|20)\d{2}\b/.test(s) && (s.match(/\d+/g) || []).length >= 2) ms = Date.parse(s);
+  }
+  if (!Number.isFinite(ms)) return null;
+  if (ms < MIN_POSTED_AT_MS || ms > now + MAX_POSTED_AT_SKEW_MS) return null;
+  return ms;
+}
 
 // Actors return URLs from arbitrary external sites — treat them as untrusted.
 // Reject anything that isn't https so javascript:/data:/file:/http: URLs can't
@@ -117,8 +143,8 @@ export function htmlToText(s) {
 
 // Write jds/{slug}-{hash}.md and return its relative path. The URL-derived hash
 // keeps two distinct postings sharing a company+title from colliding. Atomic
-// (flag:'wx') against the 10-worker TOCTOU race; any FS failure returns null so
-// the caller falls back to the remote URL.
+// (flag:'wx') against the 10-worker TOCTOU race; any FS failure returns null, and
+// the Job keeps its URL and description and gets no note.
 function saveJd(normalized, descriptionBody, sourceLabel) {
   let relPath = null;
   try {
@@ -150,7 +176,7 @@ ${descriptionBody}
     return relPath;
   } catch (err) {
     if (err?.code === 'EEXIST' && relPath) return relPath;
-    console.warn(`apify: JD cache write failed for ${normalized.title} (${err.code || err.name}: ${err.message}); falling back to remote URL`);
+    console.warn(`apify: JD cache write failed for ${normalized.title} (${err.code || err.name}: ${err.message}); keeping the URL and description, no local:jds note`);
     return null;
   }
 }
@@ -165,6 +191,10 @@ export function normalizeItem(item, fieldMap, defaults) {
   for (const [k, v] of Object.entries(defaults || {})) {
     if (!ALLOWED_DEFAULT_KEYS.has(k)) continue;
     if (!out[k]) out[k] = String(v);
+  }
+  if (fieldMap.posted_at != null) {
+    const postedAt = parsePostedAt(pickField(item, fieldMap.posted_at));
+    if (postedAt !== null) out.postedAt = postedAt;
   }
   return out;
 }
@@ -190,11 +220,12 @@ export default {
         !isFieldSpec(entry.field_map.url) ||
         (entry.field_map.company != null && !isFieldSpec(entry.field_map.company)) ||
         (entry.field_map.location != null && !isFieldSpec(entry.field_map.location)) ||
-        (entry.field_map.description != null && !isFieldSpec(entry.field_map.description))
+        (entry.field_map.description != null && !isFieldSpec(entry.field_map.description)) ||
+        (entry.field_map.posted_at != null && !isFieldSpec(entry.field_map.posted_at))
       ) {
         throw new Error(
           `apify: entry ${entry.name} has invalid field_map. Each of title, url, company, ` +
-          `location, description must be a string or a non-empty array of strings. title and url are required.`
+          `location, description, posted_at must be a string or a non-empty array of strings. title and url are required.`
         );
       }
 
@@ -215,11 +246,12 @@ export default {
           if (!descriptionBody || descriptionBody.length < MIN_JD_BODY_CHARS) {
             return normalized;
           }
-          const remoteUrl = normalized.url;
+          // Job.url is the dedup key and must stay the posting URL; the text goes
+          // in Job.description (read by content_filter) and the cache reference
+          // rides as a note, in the `local:jds/` form the modes already read.
+          normalized.description = descriptionBody;
           const jdPath = saveJd(normalized, descriptionBody, sourceLabel);
-          if (jdPath === null) return normalized;
-          normalized.url = `local:${jdPath}`;
-          normalized._remote_url = remoteUrl;
+          if (jdPath !== null) normalized.note = `local:${jdPath}`;
           return normalized;
         })
         .filter(j => j && j.title && j.url);
