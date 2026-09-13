@@ -119,6 +119,24 @@ const NAMES_LONDON = 'Join our team. You need 3 years of product experience. You
   eq('a town outside the boroughs is still dropped without remote wording', judgeAttendance(AMERSHAM, RAINBOW).drop, true);
 }
 
+// ── A town, a county, then the country (build review of Cb, fix 2) ──
+{
+  const READING = 'Reading, Berkshire, United Kingdom';
+  const office = judgeAttendance(READING, OFFICE);
+  eq('Reading, Berkshire, with no remote wording is dropped', office.drop, true);
+  eq('naming the town, not the county', office.town, 'Reading');
+  eq('Reading, Berkshire, with remote wording is kept', judgeAttendance(READING, REMOTE).drop, false);
+  eq('and labelled remote-uk', judgeAttendance(READING, REMOTE).label, 'remote-uk');
+  eq('a county before two UK words is read the same way', judgeAttendance('Reading, Berkshire, England, United Kingdom', OFFICE).town, 'Reading');
+  eq('a borough with its old county is still London', judgeAttendance('Harrow, Middlesex, United Kingdom', OFFICE).label, undefined);
+  eq('and not dropped', judgeAttendance('Harrow, Middlesex, United Kingdom', OFFICE).drop, false);
+  // Retention: two parts before the country are not a town and a county.
+  for (const loc of ['Reading, Berkshire, South East, United Kingdom', 'Reading, Remote, United Kingdom', 'Berkshire, United Kingdom, Remote']) {
+    const v = judgeAttendance(loc, OFFICE);
+    ok(`"${loc}" is left alone, with no label`, v.drop === false && v.label === undefined);
+  }
+}
+
 // ── The gate: after the read, never on an unread advert ─────────────
 {
   const gate = buildAdvertGate({});

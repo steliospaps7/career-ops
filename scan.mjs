@@ -2164,7 +2164,8 @@ function isLondonBorough(place) {
  * A location that ends in "United Kingdom" says nothing about whether Stelios
  * can do the job from London. The rule fires on one shape only: a place
  * followed by nothing but UK words ("Amersham, England, United Kingdom",
- * "Manchester, GB"), with no London in it. That place is the town, read from
+ * "Manchester, GB"), or by one county and then UK words ("Reading, Berkshire,
+ * United Kingdom"), with no London in it. That place is the town, read from
  * the listing itself, so there is no town list. Such a row stays only when the
  * listing or the advert says remote, work from home or hybrid from anywhere,
  * or names London, and is then labelled `remote-uk`; otherwise it is dropped
@@ -2183,7 +2184,12 @@ export function judgeAttendance(location, text) {
   if (!listed || /\blondon\b/i.test(listed)) return { drop: false };
   const parts = listed.replace(/\([^)]*\)/g, ' ').split(/[,;·|]/).map(part => part.trim()).filter(Boolean);
   const town = parts[0] || '';
-  const inTheUk = parts.length >= 2 && parts.slice(1).every(part => UK_PLACE_RE.test(part));
+  // After the town: UK words only, or one county and then UK words
+  // ("Reading, Berkshire, United Kingdom").
+  const rest = parts.slice(1);
+  const ukFrom = (i) => rest.length > i && rest.slice(i).every(part => UK_PLACE_RE.test(part));
+  const county = rest[0] || '';
+  const inTheUk = ukFrom(0) || (ukFrom(1) && !NOT_A_TOWN_RE.test(county));
   if (!inTheUk || UK_PLACE_RE.test(town) || NOT_A_TOWN_RE.test(town)) return { drop: false };
   if (isLondonBorough(town)) return { drop: false };
   if (ATTENDANCE_RE.test(`${listed}\n${String(text ?? '')}`)) return { drop: false, label: 'remote-uk' };
