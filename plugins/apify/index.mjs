@@ -5,8 +5,9 @@
 // seeds take only security/compat fixes — feature work happens in the successor repo.
 //
 // Apify provider plugin — runs any Apify actor and maps its dataset items to
-// the {title, url, company, location} Job shape the scanner expects. All
-// variation (which actor, what input, how to read fields) lives in portals.yml.
+// the {title, url, company, location} Job shape the scanner expects, plus
+// description, note (the local:jds/ cache reference) and postedAt when the
+// field_map asks for them. All variation (which actor, what input, how to read fields) lives in portals.yml.
 //
 // Ported from the generic Apify provider contributed by @ageem23 in #693 (with
 // thanks); it also homes the LinkedIn-via-Apify use case from #791/#1202. As a
@@ -142,8 +143,8 @@ export function htmlToText(s) {
 
 // Write jds/{slug}-{hash}.md and return its relative path. The URL-derived hash
 // keeps two distinct postings sharing a company+title from colliding. Atomic
-// (flag:'wx') against the 10-worker TOCTOU race; any FS failure returns null so
-// the caller falls back to the remote URL.
+// (flag:'wx') against the 10-worker TOCTOU race; any FS failure returns null, and
+// the Job keeps its URL and description and gets no note.
 function saveJd(normalized, descriptionBody, sourceLabel) {
   let relPath = null;
   try {
@@ -175,7 +176,7 @@ ${descriptionBody}
     return relPath;
   } catch (err) {
     if (err?.code === 'EEXIST' && relPath) return relPath;
-    console.warn(`apify: JD cache write failed for ${normalized.title} (${err.code || err.name}: ${err.message}); falling back to remote URL`);
+    console.warn(`apify: JD cache write failed for ${normalized.title} (${err.code || err.name}: ${err.message}); keeping the URL and description, no local:jds note`);
     return null;
   }
 }

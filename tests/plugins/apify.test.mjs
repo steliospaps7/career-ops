@@ -12,13 +12,14 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 
 console.log('\nPlugin: apify');
 
 const PLUGIN_PATH = join(ROOT, 'plugins', 'apify', 'index.mjs');
 const mod = await import(pathToFileURL(PLUGIN_PATH).href);
 const provider = mod.default.provider;
-const { normalizeItem } = mod;
+const { normalizeItem, parsePostedAt } = mod;
 
 const POSTING_URL = 'https://uk.indeed.com/viewjob?jk=abc123';
 const LONG_DESCRIPTION = '<p>We are hiring a Finance Operations Lead.</p><p>You will own month-end close and controls.</p>';
@@ -192,7 +193,10 @@ const DATE_MAP = { ...BASE_MAP, posted_at: ['postedAt', 'datePosted'] };
 }
 
 {
-  // Anything that is not a sane absolute date is omitted, never guessed.
+  // parsePostedAt, the guard itself, with a fixed clock: anything that is not a
+  // sane absolute date is null, never guessed.
+  const NOW = Date.UTC(2026, 8, 13, 12, 0, 0);
+  const DAY = 86_400_000;
   const cases = [
     ['relative English', '3 days ago'],
     ['junk text Date.parse would still read as 2001', 'not a date 5'],
@@ -201,21 +205,38 @@ const DATE_MAP = { ...BASE_MAP, posted_at: ['postedAt', 'datePosted'] };
     ['1970 as epoch 0', 0],
     ['1970 as an ISO string', '1970-01-01T00:00:00Z'],
     ['1999', '1999-12-31T00:00:00Z'],
-    ['more than a day in the future', Date.now() + 3 * 86_400_000],
+    ['more than a day ahead, in ms', NOW + DAY + 1],
+    ['more than a day ahead, in seconds', Math.floor((NOW + 3 * DAY) / 1000)],
     ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['undefined', undefined],
+    ['null', null],
     ['an object', { date: '2025-03-10' }],
     ['a boolean', true],
   ];
   const leaked = cases
-    .map(([label, value]) => [label, normalizeItem({ ...baseItem(), postedAt: value }, DATE_MAP, {})])
-    .filter(([, out]) => 'postedAt' in out)
-    .map(([label, out]) => `${label} -> ${out.postedAt}`);
-  if (leaked.length === 0) pass('junk, relative, 1970, pre-2000 and future dates are omitted');
-  else fail(`postedAt set for: ${leaked.join('; ')}`);
+    .map(([label, value]) => [label, parsePostedAt(value, NOW)])
+    .filter(([, out]) => out !== null)
+    .map(([label, out]) => `${label} -> ${out}`);
+  if (leaked.length === 0) pass('parsePostedAt returns null for junk, relative, bare-year, 1970, pre-2000, future and non-finite values');
+  else fail(`parsePostedAt accepted: ${leaked.join('; ')}`);
 
-  const soon = normalizeItem({ ...baseItem(), postedAt: Date.now() + 3_600_000 }, DATE_MAP, {});
-  if (typeof soon.postedAt === 'number') pass('a date within a day ahead (a timezone skew) is kept');
-  else fail('a date one hour ahead was dropped');
+  if (parsePostedAt(NOW + 3_600_000, NOW) === NOW + 3_600_000 && parsePostedAt(NOW + DAY, NOW) === NOW + DAY) {
+    pass('parsePostedAt keeps a date up to one day ahead (a timezone skew)');
+  } else {
+    fail('parsePostedAt dropped a date within the one-day skew');
+  }
+
+  if (parsePostedAt('2025-03-10', NOW) === Date.UTC(2025, 2, 10) && parsePostedAt('Posted 12/03/2024', NOW) !== null) {
+    pass('parsePostedAt reads a date-only string and a date inside text that carries a full date');
+  } else {
+    fail(`parsePostedAt date-only = ${parsePostedAt('2025-03-10', NOW)}`);
+  }
+
+  // normalizeItem leaves the key off, rather than setting it to null.
+  const omitted = normalizeItem({ ...baseItem(), postedAt: '3 days ago' }, DATE_MAP, {});
+  if (!('postedAt' in omitted)) pass('normalizeItem omits postedAt when the guard returns null');
+  else fail(`normalizeItem set postedAt = ${omitted.postedAt}`);
 }
 
 {
@@ -262,6 +283,31 @@ const DATE_MAP = { ...BASE_MAP, posted_at: ['postedAt', 'datePosted'] };
       pass('a field_map with no posted_at produces the same provider output as before');
     } else {
       fail(`provider jobs without posted_at = ${JSON.stringify(jobs)}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+{
+  // The same with description mapped: without posted_at the provider gives the
+  // four fields plus description and note, as after the URL fix, and no date.
+  const item = { ...baseItem(), postedAt: '2025-03-10T08:00:00.000Z' };
+  const { jobs, dir } = await fetchWith([item], { ...BASE_MAP, description: 'description' });
+  try {
+    const hash = createHash('sha1').update(POSTING_URL).digest('hex').slice(0, 10);
+    const expected = [{
+      title: 'Finance Operations Lead',
+      url: POSTING_URL,
+      company: 'Acme',
+      location: 'London',
+      description: 'We are hiring a Finance Operations Lead.\n\nYou will own month-end close and controls.',
+      note: `local:jds/acme-finance-operations-lead-${hash}.md`,
+    }];
+    if (JSON.stringify(jobs) === JSON.stringify(expected)) {
+      pass('with description and no posted_at, the provider output is the four fields plus description and note');
+    } else {
+      fail(`provider jobs with description, without posted_at = ${JSON.stringify(jobs)}`);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
