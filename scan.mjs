@@ -2591,34 +2591,57 @@ function yearsSegmentValue(value) {
   return Number.isInteger(n) && n > 0 && n < 100 ? n : null;
 }
 
+/**
+ * Read and write one labelled segment, `| <name>: <value>`, on a queue line.
+ * `years:` and `location:` share it.
+ *
+ * Like `insertRouteSegment` the writer overwrites, and for the same reason: the
+ * rule that wrote a label can change, and a re-run must be able to correct a
+ * label it wrote last week. A null removes it. A new segment goes in before
+ * `route:` and `note:`.
+ *
+ * @param {string} name - the label, e.g. `years`.
+ * @param {RegExp} pattern - matches the segment, the value in group 1.
+ * @param {(value: unknown) => (string|number|null)} normalise - the value to
+ *   write, or null for anything the label does not accept.
+ */
+function labelledSegment(name, pattern, normalise) {
+  const extract = (line) => {
+    const m = String(line).match(pattern);
+    return m ? normalise(m[1]) : null;
+  };
+  const insert = (line, raw) => {
+    const value = normalise(raw);
+    const text = String(line);
+    if (pattern.test(text)) {
+      if (value == null) return text.replace(pattern, '').replace(/\s{2,}/g, ' ').replace(/\s+$/, '');
+      return text.replace(pattern, `| ${name}: ${value}`);
+    }
+    if (value == null) return text;
+    const segment = `| ${name}: ${value}`;
+    for (const before of ['| route:', '| note:']) {
+      const at = text.indexOf(before);
+      if (at !== -1) return `${text.slice(0, at)}${segment} ${text.slice(at)}`;
+    }
+    return `${text.replace(/\s+$/, '')} ${segment}`;
+  };
+  return { extract, insert };
+}
+
+const yearsSegment = labelledSegment('years', YEARS_SEGMENT_RE, yearsSegmentValue);
+
 /** The long-shot years a queue line already carries, or null. */
 export function extractYearsSegment(line) {
-  const m = String(line).match(YEARS_SEGMENT_RE);
-  return m ? Number.parseInt(m[1], 10) : null;
+  return yearsSegment.extract(line);
 }
 
 /**
- * Add, replace or remove the segment on a queue line.
- *
- * Like `insertRouteSegment` this one overwrites, and for the same reason: the
- * rule that wrote it can change, and a re-run must be able to correct a label
- * it wrote last week. A null removes it, so a row the reader has since read
- * properly stops claiming a bar the advert does not carry.
+ * Add, replace or remove the segment on a queue line. A null removes it, so a
+ * row the reader has since read properly stops claiming a bar the advert does
+ * not carry.
  */
 export function insertYearsSegment(line, years) {
-  const value = yearsSegmentValue(years);
-  const text = String(line);
-  if (extractYearsSegment(text) != null) {
-    if (value == null) return text.replace(YEARS_SEGMENT_RE, '').replace(/\s{2,}/g, ' ').replace(/\s+$/, '');
-    return text.replace(YEARS_SEGMENT_RE, `| years: ${value}`);
-  }
-  if (value == null) return text;
-  const segment = `| years: ${value}`;
-  for (const before of ['| route:', '| note:']) {
-    const at = text.indexOf(before);
-    if (at !== -1) return `${text.slice(0, at)}${segment} ${text.slice(at)}`;
-  }
-  return `${text.replace(/\s+$/, '')} ${segment}`;
+  return yearsSegment.insert(line, years);
 }
 
 // The attendance segment on an existing queue line, `| location: remote-uk`.
@@ -2630,31 +2653,19 @@ function locationSegmentValue(value) {
   return String(value ?? '').trim().toLowerCase() === 'remote-uk' ? 'remote-uk' : null;
 }
 
+const locationSegment = labelledSegment('location', LOCATION_SEGMENT_RE, locationSegmentValue);
+
 /** The attendance label a queue line already carries, or null. */
 export function extractLocationSegment(line) {
-  const m = String(line).match(LOCATION_SEGMENT_RE);
-  return m ? m[1].toLowerCase() : null;
+  return locationSegment.extract(line);
 }
 
 /**
- * Add, replace or remove the segment, before `route:` and `note:`. It
- * overwrites and a null removes it, like `insertYearsSegment`: a re-run under
- * a changed advert or listing must be able to take a label back.
+ * Add, replace or remove the segment. A re-run under a changed advert or
+ * listing must be able to take a label back.
  */
 export function insertLocationSegment(line, label) {
-  const value = locationSegmentValue(label);
-  const text = String(line);
-  if (extractLocationSegment(text) != null) {
-    if (value == null) return text.replace(LOCATION_SEGMENT_RE, '').replace(/\s{2,}/g, ' ').replace(/\s+$/, '');
-    return text.replace(LOCATION_SEGMENT_RE, `| location: ${value}`);
-  }
-  if (value == null) return text;
-  const segment = `| location: ${value}`;
-  for (const before of ['| route:', '| note:']) {
-    const at = text.indexOf(before);
-    if (at !== -1) return `${text.slice(0, at)}${segment} ${text.slice(at)}`;
-  }
-  return `${text.replace(/\s+$/, '')} ${segment}`;
+  return locationSegment.insert(line, label);
 }
 
 // The route segment on an existing queue line, e.g. `| route: score`. Read and

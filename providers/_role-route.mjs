@@ -5,8 +5,9 @@
  * evaluation token is spent. Tier 1, tier 2 and flagged roles wait for
  * Stelios's Evaluate; everything else gets the standard CV and the basic
  * answers with no evaluation. A role whose advert nobody read is
- * `route: review` instead, and waits for a person to read it (ticket C, C2). The fit gate runs on both routes — the route
- * decides what an application costs, never whether the advert is read.
+ * `route: review` instead, and waits for a person to read it (ticket C, C2).
+ * The fit gate runs on both routes — the route decides what an application
+ * costs, never whether the advert is read.
  *
  * Pure by design, so a change to the tier rule is a one-line edit with a test.
  * The tier table is `data/companies.tsv`, which belongs to the Tiers chat: this
