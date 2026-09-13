@@ -121,14 +121,19 @@ function only(label, text) {
 
 {
   // T13 — A04: company history is not candidate experience.
+  // "We have served customers for 5+ years." says nothing about experience in
+  // its own sentence, so since the build review's fix 3 it is not read as a
+  // clause at all; it used to borrow "experience" from the next sentence and
+  // was saved only by its company subject. The audit asks that T13 is not
+  // rejected on the five and that company age is not his experience; both
+  // hold. The company subject is proved in section 2, on a company sentence
+  // that does carry the word.
   const text = 'We have served customers for 5+ years. You need two years of experience.';
   const clauses = extractExperienceClauses(text);
-  eq('T13 reads both sentences', clauses.length, 2);
-  if (clauses.length === 2) {
-    eq('T13 the five-year clause is read', clauses[0].minimum, 5);
-    eq('T13 and attributed to the company, not to him', clauses[0].subject, 'company');
-    eq('T13 the two-year requirement is his', clauses[1].minimum, 2);
-    eq('T13 and is about the candidate', clauses[1].subject, 'candidate');
+  eq('T13 reads only the candidate sentence', clauses.length, 1);
+  if (clauses.length === 1) {
+    eq('T13 the two-year requirement is his', clauses[0].minimum, 2);
+    eq('T13 and is about the candidate', clauses[0].subject, 'candidate');
   }
   eq('T13 has no binding clause at five', binding(text).filter(c => c.minimum >= 5).length, 0);
 }
@@ -557,6 +562,58 @@ function only(label, text) {
     if (clauses.length > 0) { bound++; fail(`${label}: a non-experience sentence binds the row: ${JSON.stringify(clauses)}`); }
   }
   if (bound === 0) pass(`none of the ${notExperience.length} age, tenure, residency or loyalty sentences binds the row`);
+}
+
+{
+  // A real bar and a benefits line inside the same 150 characters. The
+  // relevance test and the exclusion used to read that whole window, so 9fin's
+  // sabbatical sentence suppressed a six-year bar beside it and a role the
+  // decision table puts out survived. Both now read the clause's own sentence.
+  // Both orders, and in each the bar binds while the benefit does not.
+  const bar = 'You must have 6+ years of experience in operations.';
+  const benefit = 'Work abroad for up to 3 months a year, 1 month paid sabbatical after 5 years of service, and experience days.';
+  for (const [label, text] of [['bar first', `${bar} ${benefit}`], ['benefit first', `${benefit} ${bar}`]]) {
+    eq(`${label}: the six-year bar binds and the sabbatical does not`, binding(text).map(c => c.minimum).join(), '6');
+  }
+}
+
+{
+  // The relevance half on its own: a company sentence with no experience word
+  // used to borrow "experience" from the next sentence, and with "you" close
+  // enough it bound the row at five.
+  const text = 'Revenue doubled every year for 5 years. You will need 2 years of experience.';
+  eq('a neighbouring sentence does not make a growth figure an experience clause', binding(text).map(c => c.minimum).join(), '2');
+}
+
+{
+  // The price of reading only the clause's own sentence: five stored adverts
+  // whose bar carries no "experience" of its own and had been borrowing it
+  // from a neighbour. Each shape is now read inside the sentence. Quoted from
+  // the files under `jds/`.
+  const shapes = [
+    ['Jonas, "in a" and a role', 'JOB QUALIFICATIONS: - 5+ years in a senior management or business leadership role within software.', 5],
+    ['Moneybox, "as a" and a role', 'This likely looks like 5+ years as a Programme Manager and 10+ years overall in change, transformation, data, AI, or engineering delivery.', 5],
+    ['SeedLegals, a verb in -ing', 'Five or more years driving product with engineers and designers.', 5],
+    ['Toast, a verb in -ing', '(Requirements) - ~8+ years shipping complex software products with demonstrated ownership of multi-team programs.', 8],
+    ['Entain, years after a degree', 'Ability to lead a team, ideally at a top tier consultancy (such as McKinsey, BCG, Bain, OW, Kearney) with 6-10 years post undergrad or more than 2-3 years post MBA.', 6],
+  ];
+  for (const [label, text, expected] of shapes) {
+    ok(`${label} is read as a bar at ${expected}`, binding(text).some(c => c.minimum === expected));
+  }
+  // And the look-alikes those shapes must not take in.
+  const notShapes = [
+    'Recognised as a Best Place to Work in Technology 3 years in a row.',
+    'Voted top employer for 5 years running.',
+  ];
+  for (const text of notShapes) eq(`not an experience clause: ${text}`, extractExperienceClauses(text).length, 0);
+  // The -ing shape also fits a company's own history, so these must stay the
+  // company's. Kraken's is in four stored adverts; Reynolds' uses a curly
+  // apostrophe, which the straight "we've" cue did not match.
+  const history = [
+    ['Kraken', 'Payward Services and CF Benchmarks - has spent the last 15 years building one of the most modern financial infrastructure platforms in the industry.'],
+    ['Reynolds', 'At Reynolds Food Group, we’ve spent over 80 years sourcing and supplying the freshest ingredients to the UK’s food service industry.'],
+  ];
+  for (const [label, text] of history) eq(`${label}: a company spending years doing something binds nothing`, binding(text).length, 0);
 }
 
 {

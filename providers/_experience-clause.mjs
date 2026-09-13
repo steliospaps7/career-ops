@@ -93,8 +93,16 @@ const EXPERIENCE_RE = /experien|background|track record|in a similar role|tenure
  * 60 years of attitude and heritage" — and admitting it dropped three real
  * stored adverts on the employer's history, which is the very thing finding A04
  * is about. "5 years of experience" still reads, through the word cue above.
+ *
+ * Three more shapes, since relevance reads only the clause's own sentence and
+ * a bar can no longer borrow "experience" from a neighbour. Each is from a
+ * stored advert that lost its bar without it: "5+ years in a senior management
+ * role" and "5+ years as a Programme Manager" (an article, but not "in a row"),
+ * "Five or more years driving product" and "8+ years shipping complex
+ * software" (a verb in -ing, but not "5 years running"), and "6-10 years post
+ * undergrad".
  */
-const DOMAIN_RE = /^\s*(?:in|within|as|working)\s+(?!the\b|a\b|an\b|this\b|that\b|these\b|our\b|their\b|its\b|last\b|past\b|recent\b|order\b)[a-z]/i;
+const DOMAIN_RE = /^\s*(?:(?:in|within|as|working)\s+(?!the\b|a\b|an\b|this\b|that\b|these\b|our\b|their\b|its\b|last\b|past\b|recent\b|order\b)[a-z]|(?:in|as)\s+an?\s+(?!row\b)[a-z]|(?!running\b)[a-z]+ing\b|post[\s-]+[a-z])/i;
 
 /**
  * Sentences that carry a years number and are plainly not about the reader's
@@ -114,13 +122,14 @@ const NOT_EXPERIENCE_RE = /\byears?\s+(?:old\b|or older\b|of age\b)|sabbatical|\
 const WINDOW_BEFORE = 110;
 const WINDOW_AFTER = 130;
 
-/** The relevance window is NOT clipped to the sentence, because the word
- * "experience" is often in the neighbouring clause: the audit's own T12 reads
- * "You need two years of experience; 5+ years is preferred, not required", and
- * the second half carries the bar without carrying the word. Kept close so
- * Greenhouse's disability form — "we need to ask this question at least every
- * five years" — still reaches nothing. */
-const RELEVANCE_WINDOW = 150;
+/** A sentence ends at a full stop, a question mark, an exclamation mark or a
+ * semicolon. A statement ignores the semicolon. The cues and the exclusion
+ * read the sentence, because a preference in one half of a semicolon does not
+ * answer for the other. Relevance reads the statement, because the audit's own
+ * T12 is "You need two years of experience; 5+ years is preferred, not
+ * required", and the second half carries the bar without carrying the word. */
+const SENTENCE_END = /[.!?;]/;
+const STATEMENT_END = /[.!?]/;
 
 /** The quoted sentence is read by a person on a DROP line, so it is capped. */
 const SENTENCE_CAP = 240;
@@ -196,6 +205,12 @@ const COMPANY_CUES = [
   // "5+ years experience in business operations", and the short form read that
   // requirement as the employer's own age and would have kept the row.
   'been in business', 'in business for', 'in business since',
+  // A company spending its years doing something, which the -ing shape in
+  // DOMAIN_RE would otherwise read as a bar: Kraken's "has spent the last 15
+  // years building" and Reynolds' "we’ve spent over 80 years sourcing", whose
+  // curly apostrophe the straight "we've" above does not match. "has spent"
+  // and not "spent": "You've spent 2 to 3 years" is the reader.
+  'has spent', 'we’ve',
 ];
 
 function toNumber(token) {
@@ -324,11 +339,11 @@ function quote(text, bounds, matchStart, matchEnd) {
  * Every caller clips to the window anyway, so the scan stops there too, and
  * `clippedStart` / `clippedEnd` say an edge is the window's and not a real
  * boundary. */
-function sentenceBounds(text, at, floor = 0, ceiling = text.length) {
+function sentenceBounds(text, at, floor = 0, ceiling = text.length, ends = SENTENCE_END) {
   let start = floor;
   let clippedStart = floor > 0;
   for (let i = at; i > 0 && i >= floor; i--) {
-    if (/[.!?;]/.test(text[i - 1]) && (i >= text.length || /\s/.test(text[i]))) {
+    if (ends.test(text[i - 1]) && (i >= text.length || /\s/.test(text[i]))) {
       start = i;
       clippedStart = false;
       break;
@@ -337,7 +352,7 @@ function sentenceBounds(text, at, floor = 0, ceiling = text.length) {
   let end = ceiling;
   let clippedEnd = ceiling < text.length;
   for (let i = at; i < ceiling; i++) {
-    if (/[.!?;]/.test(text[i]) && (i + 1 >= text.length || /\s/.test(text[i + 1]))) {
+    if (ends.test(text[i]) && (i + 1 >= text.length || /\s/.test(text[i + 1]))) {
       end = i + 1;
       clippedEnd = false;
       break;
@@ -373,28 +388,23 @@ export function extractExperienceClauses(text) {
     const minimum = toNumber(m[1]);
     if (minimum == null) continue;
 
-    // Is this a years number about experience at all? Asked of a wider window
-    // than the cues below, and of the neighbouring text rather than only this
-    // sentence.
-    const near = lower.slice(
-      Math.max(0, m.index - RELEVANCE_WINDOW),
-      Math.min(lower.length, m.index + m[0].length + RELEVANCE_WINDOW),
-    );
-    const after = flat.slice(m.index + m[0].length, m.index + m[0].length + 24);
-    if (!EXPERIENCE_RE.test(near) && !DOMAIN_RE.test(after)) continue;
-    if (NOT_EXPERIENCE_RE.test(near)) continue;
-
-    // The cues and the quote come from the clause's own sentence, so a
-    // preference in one half of a semicolon does not answer for the other.
-    const bounds = sentenceBounds(
-      flat,
-      m.index,
-      Math.max(0, m.index - WINDOW_BEFORE),
-      Math.min(flat.length, m.index + m[0].length + WINDOW_AFTER),
-    );
+    // Everything below reads the clause's own sentence, never the text around
+    // it: a window that crossed a full stop let 9fin's sabbatical line suppress
+    // a real bar beside it, and let a company's growth figure borrow
+    // "experience" from the next sentence.
+    const floor = Math.max(0, m.index - WINDOW_BEFORE);
+    const ceiling = Math.min(flat.length, m.index + m[0].length + WINDOW_AFTER);
+    const bounds = sentenceBounds(flat, m.index, floor, ceiling);
     const from = Math.max(bounds.start, m.index - WINDOW_BEFORE);
     const to = Math.min(bounds.end, m.index + m[0].length + WINDOW_AFTER);
     const window = lower.slice(from, to);
+
+    // Is this a years number about experience at all?
+    const statement = sentenceBounds(flat, m.index, floor, ceiling, STATEMENT_END);
+    const relevant = lower.slice(statement.start, statement.end);
+    const after = flat.slice(m.index + m[0].length, m.index + m[0].length + 24);
+    if (!EXPERIENCE_RE.test(relevant) && !DOMAIN_RE.test(after)) continue;
+    if (NOT_EXPERIENCE_RE.test(window)) continue;
 
     const at = m.index - from;
     const end = at + m[0].trimEnd().length;
