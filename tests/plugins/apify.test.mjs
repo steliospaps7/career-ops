@@ -170,3 +170,123 @@ const baseItem = () => ({
     fail(`normalizeItem = ${JSON.stringify(out)}`);
   }
 }
+
+// ── The posting date ─────────────────────────────────────────────────────────
+
+const POSTED_MS = Date.UTC(2025, 2, 10, 8, 0, 0); // 2025-03-10T08:00:00Z
+const DATE_MAP = { ...BASE_MAP, posted_at: ['postedAt', 'datePosted'] };
+
+{
+  const iso = normalizeItem({ ...baseItem(), postedAt: '2025-03-10T08:00:00.000Z' }, DATE_MAP, {});
+  const secs = normalizeItem({ ...baseItem(), postedAt: POSTED_MS / 1000 }, DATE_MAP, {});
+  const ms = normalizeItem({ ...baseItem(), datePosted: POSTED_MS }, DATE_MAP, {});
+  if (iso.postedAt === POSTED_MS && secs.postedAt === POSTED_MS && ms.postedAt === POSTED_MS) {
+    pass('posted_at in ISO, epoch seconds and epoch milliseconds lands as the same epoch-ms postedAt');
+  } else {
+    fail(`postedAt iso=${iso.postedAt} secs=${secs.postedAt} ms=${ms.postedAt} (expected ${POSTED_MS})`);
+  }
+
+  const rfc = normalizeItem({ ...baseItem(), postedAt: 'Mon, 10 Mar 2025 08:00:00 GMT' }, DATE_MAP, {});
+  if (rfc.postedAt === POSTED_MS) pass('an RFC 2822 date string is read');
+  else fail(`rfc postedAt = ${rfc.postedAt}`);
+}
+
+{
+  // Anything that is not a sane absolute date is omitted, never guessed.
+  const cases = [
+    ['relative English', '3 days ago'],
+    ['junk text Date.parse would still read as 2001', 'not a date 5'],
+    ['a bare year', '2024'],
+    ['an empty string', ''],
+    ['1970 as epoch 0', 0],
+    ['1970 as an ISO string', '1970-01-01T00:00:00Z'],
+    ['1999', '1999-12-31T00:00:00Z'],
+    ['more than a day in the future', Date.now() + 3 * 86_400_000],
+    ['NaN', Number.NaN],
+    ['an object', { date: '2025-03-10' }],
+    ['a boolean', true],
+  ];
+  const leaked = cases
+    .map(([label, value]) => [label, normalizeItem({ ...baseItem(), postedAt: value }, DATE_MAP, {})])
+    .filter(([, out]) => 'postedAt' in out)
+    .map(([label, out]) => `${label} -> ${out.postedAt}`);
+  if (leaked.length === 0) pass('junk, relative, 1970, pre-2000 and future dates are omitted');
+  else fail(`postedAt set for: ${leaked.join('; ')}`);
+
+  const soon = normalizeItem({ ...baseItem(), postedAt: Date.now() + 3_600_000 }, DATE_MAP, {});
+  if (typeof soon.postedAt === 'number') pass('a date within a day ahead (a timezone skew) is kept');
+  else fail('a date one hour ahead was dropped');
+}
+
+{
+  // No posted_at in the field_map: normalizeItem is byte-identical to before,
+  // even when the item carries a date field.
+  const item = { ...baseItem(), postedAt: '2025-03-10T08:00:00.000Z' };
+  const out = normalizeItem(item, BASE_MAP, { location: 'Remote' });
+  if (JSON.stringify(out) === JSON.stringify({ title: 'Finance Operations Lead', url: POSTING_URL, company: 'Acme', location: 'London' })) {
+    pass('a field_map with no posted_at leaves normalizeItem output unchanged');
+  } else {
+    fail(`normalizeItem without posted_at = ${JSON.stringify(out)}`);
+  }
+
+  // A default can never supply the date: defaults stay limited to the four fields.
+  const viaDefault = normalizeItem(baseItem(), BASE_MAP, { postedAt: POSTED_MS, posted_at: '2025-03-10' });
+  if (!('postedAt' in viaDefault)) pass('defaults cannot set postedAt');
+  else fail(`defaults set postedAt = ${viaDefault.postedAt}`);
+}
+
+{
+  // Through the provider: the date reaches the Job beside the description and note.
+  const item = { ...baseItem(), postedAt: '2025-03-10T08:00:00.000Z' };
+  const { jobs, dir } = await fetchWith([item], { ...DATE_MAP, description: 'description' });
+  try {
+    const job = jobs[0];
+    if (job?.postedAt === POSTED_MS && job.url === POSTING_URL && /^local:jds\//.test(job.note || '')) {
+      pass('the provider emits postedAt with the URL and note intact');
+    } else {
+      fail(`provider job with posted_at = ${JSON.stringify(job)}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+{
+  // Without posted_at the provider output is exactly the plugin's output before
+  // this field existed, for an item that carries a date.
+  const item = { ...baseItem(), postedAt: '2025-03-10T08:00:00.000Z' };
+  const { jobs, dir } = await fetchWith([item], BASE_MAP);
+  try {
+    const expected = [{ title: 'Finance Operations Lead', url: POSTING_URL, company: 'Acme', location: 'London' }];
+    if (JSON.stringify(jobs) === JSON.stringify(expected)) {
+      pass('a field_map with no posted_at produces the same provider output as before');
+    } else {
+      fail(`provider jobs without posted_at = ${JSON.stringify(jobs)}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+{
+  // A malformed posted_at is rejected at config-load time, before any request.
+  let requests = 0;
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = async () => { requests++; return new Response('{}', { status: 500 }); };
+  let error = null;
+  try {
+    await provider.fetch(
+      { name: 'Fixture', actor: 'fixture/actor', field_map: { ...BASE_MAP, posted_at: 42 } },
+      { env: { APIFY_TOKEN: 'test-token' } },
+    );
+  } catch (err) {
+    error = err;
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  if (error && /invalid field_map/.test(error.message) && /posted_at/.test(error.message) && requests === 0) {
+    pass('an invalid posted_at spec fails with the field_map error and makes no request');
+  } else {
+    fail(`invalid posted_at: error=${error?.message} requests=${requests}`);
+  }
+}

@@ -29,4 +29,7 @@ tracked_companies:
 
 `node scan.mjs` runs the provider for that entry and writes the results to the
 pipeline like any other source. An optional `field_map.description` caches the
-JD locally under `jds/`.
+JD locally under `jds/`. An optional `field_map.posted_at` names the item's
+posting-date field (an absolute date string, or epoch seconds or milliseconds)
+so `max_posting_age_days` can apply; a value it cannot read as a date is left
+out, never guessed.
