@@ -185,7 +185,7 @@ const TIERS = parseTiersTable('name\tnotes\ttier\nQuiet Co\t\t3');
   const out = sections(first);
   eq('Amersham without remote wording is dropped', counts.drops.rows.length, 1);
   eq('on the location rule', counts.drops.rows[0]?.reason, 'location');
-  eq('the moved line names the town', out.processed[0], `${officeLine} | skipped (location: "Amersham", 2026-09-13)`);
+  eq('the moved line names the town', out.processed[0], `${officeLine.replace('- [ ]', '- [x]')} | skipped (location: "Amersham", 2026-09-13)`);
   eq('Amersham with remote wording stays pending, labelled', out.pending[0], remoteLine.replace('| route: standard', '| location: remote-uk | route: standard'));
   eq('the London line is kept with no label', out.pending[1], londonLine);
   eq('and the kept rows are still routed', extractRouteSegment(out.pending[0]), 'standard');

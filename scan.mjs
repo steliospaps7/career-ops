@@ -2135,6 +2135,43 @@ export function judgeExperienceYears(text, extract = extractExperienceClauses) {
   return { drop: false };
 }
 
+// The words the location rule reads (ticket C, C4). Country words, not towns.
+const UK_PLACE_RE = /^(?:united kingdom|uk|u\.k\.|gb|gbr|great britain|britain|england|scotland|wales|northern ireland)$/i;
+const NOT_A_TOWN_RE = /\b(?:remote|hybrid|home|anywhere|on-?site|office)\b/i;
+const ATTENDANCE_RE = /\bremote(?:ly)?\b|\bwork(?:ing)? from home\b|\bhybrid from anywhere\b|\blondon\b/i;
+
+/**
+ * Where the listing says the job is, read against what the advert says about
+ * attendance (ticket C, C4).
+ *
+ * A location that ends in "United Kingdom" says nothing about whether Stelios
+ * can do the job from London. The rule fires on one shape only: a place
+ * followed by nothing but UK words ("Amersham, England, United Kingdom",
+ * "Manchester, GB"), with no London in it. That place is the town, read from
+ * the listing itself, so there is no town list. Such a row stays only when the
+ * listing or the advert says remote, work from home or hybrid from anywhere,
+ * or names London, and is then labelled `remote-uk`; otherwise it is dropped
+ * with the town named, which is the brief's "Outside London" hard fail.
+ *
+ * A London listing, a country on its own, a list of countries and a town with
+ * no country word are all left alone: none of them names a UK town outside
+ * London.
+ *
+ * @param {string} location - the listing's location cell.
+ * @param {string} text - the advert, as stored.
+ * @returns {{drop: boolean, town?: string, label?: string}}
+ */
+export function judgeAttendance(location, text) {
+  const listed = typeof location === 'string' ? location.trim() : '';
+  if (!listed || /\blondon\b/i.test(listed)) return { drop: false };
+  const parts = listed.replace(/\([^)]*\)/g, ' ').split(/[,;·|]/).map(part => part.trim()).filter(Boolean);
+  const town = parts[0] || '';
+  const inTheUk = parts.length >= 2 && parts.slice(1).every(part => UK_PLACE_RE.test(part));
+  if (!inTheUk || UK_PLACE_RE.test(town) || NOT_A_TOWN_RE.test(town)) return { drop: false };
+  if (ATTENDANCE_RE.test(`${listed}\n${String(text ?? '')}`)) return { drop: false, label: 'remote-uk' };
+  return { drop: true, town };
+}
+
 /**
  * Why a row was dropped, in the words of the filter that dropped it.
  *
@@ -2210,14 +2247,15 @@ export function buildDropExplainer(config = {}, candidateCountry = '') {
   };
 }
 
-/** The three drop reasons the gate can return, in the order it tries them. */
-export const ADVERT_DROP_REASONS = ['content', 'years', 'countryEligibility', 'visa'];
+/** The drop reasons the gate can return, in the order it tries them. */
+export const ADVERT_DROP_REASONS = ['content', 'years', 'countryEligibility', 'visa', 'location'];
 
 export const ADVERT_DROP_LABELS = {
   content: 'content',
   years: 'years',
   countryEligibility: 'eligibility',
   visa: 'visa',
+  location: 'location',
 };
 
 /**
@@ -2239,7 +2277,7 @@ export function buildAdvertGate({ contentFilter, countryEligibilityFilter, visaF
   const why = explain || (() => '');
   const clauses = experienceClauses || extractExperienceClauses;
 
-  return function gate({ description = '', matchedKeywords = [], readStatus = null } = {}) {
+  return function gate({ description = '', matchedKeywords = [], readStatus = null, location = '' } = {}) {
     if (readStatus != null && readStatus !== 'read') return { drop: false, unread: true };
     if (!content(description, matchedKeywords)) {
       return { drop: true, reason: 'content', phrase: why('content', description, matchedKeywords) };
@@ -2257,7 +2295,16 @@ export function buildAdvertGate({ contentFilter, countryEligibilityFilter, visaF
     if (!visa(description)) {
       return { drop: true, reason: 'visa', phrase: why('visa', description) };
     }
-    return years.years ? { drop: false, years: years.years } : { drop: false };
+    // The location rule (ticket C, C4), after the read and last, so a row
+    // another rule drops is named for that rule. The town is the phrase.
+    const attendance = judgeAttendance(location, description);
+    if (attendance.drop) {
+      return { drop: true, reason: 'location', phrase: attendance.town };
+    }
+    const kept = { drop: false };
+    if (years.years) kept.years = years.years;
+    if (attendance.label) kept.location = attendance.label;
+    return kept;
   };
 }
 
@@ -2459,6 +2506,10 @@ export function formatPipelineOffer(offer) {
   // the row reached the queue. A row below the stretch produces no segment.
   const years = yearsSegmentValue(offer.years);
   if (years != null) line = `${line} | years: ${years}`;
+  // Labeled attendance segment (ticket C, C4) — a UK town outside London kept
+  // because the advert says remote or names London. After years:, before route:.
+  const locationLabel = locationSegmentValue(offer.locationLabel);
+  if (locationLabel) line = `${line} | location: ${locationLabel}`;
   // Labeled route segment (ticket B2) — which effort this row gets, decided
   // before any evaluation token is spent. Ordered after jd:, before note:, for
   // a stable serialization. An offer with no route produces no segment, so a
@@ -2539,6 +2590,42 @@ export function insertYearsSegment(line, years) {
   return `${text.replace(/\s+$/, '')} ${segment}`;
 }
 
+// The attendance segment on an existing queue line, `| location: remote-uk`.
+// Labelled, unlike the positional location cell, which it never replaces.
+const LOCATION_SEGMENT_RE = /\|\s*location:\s*(remote-uk)\b/i;
+
+/** The one label the location rule writes, or null for anything else. */
+function locationSegmentValue(value) {
+  return String(value ?? '').trim().toLowerCase() === 'remote-uk' ? 'remote-uk' : null;
+}
+
+/** The attendance label a queue line already carries, or null. */
+export function extractLocationSegment(line) {
+  const m = String(line).match(LOCATION_SEGMENT_RE);
+  return m ? m[1].toLowerCase() : null;
+}
+
+/**
+ * Add, replace or remove the segment, before `route:` and `note:`. It
+ * overwrites and a null removes it, like `insertYearsSegment`: a re-run under
+ * a changed advert or listing must be able to take a label back.
+ */
+export function insertLocationSegment(line, label) {
+  const value = locationSegmentValue(label);
+  const text = String(line);
+  if (extractLocationSegment(text) != null) {
+    if (value == null) return text.replace(LOCATION_SEGMENT_RE, '').replace(/\s{2,}/g, ' ').replace(/\s+$/, '');
+    return text.replace(LOCATION_SEGMENT_RE, `| location: ${value}`);
+  }
+  if (value == null) return text;
+  const segment = `| location: ${value}`;
+  for (const before of ['| route:', '| note:']) {
+    const at = text.indexOf(before);
+    if (at !== -1) return `${text.slice(0, at)}${segment} ${text.slice(at)}`;
+  }
+  return `${text.replace(/\s+$/, '')} ${segment}`;
+}
+
 // The route segment on an existing queue line, e.g. `| route: score`. Read and
 // written by the standalone pass, which labels lines the scan wrote on an
 // earlier day. `review` is an unread advert's route (ticket C, C2); a value
@@ -2600,14 +2687,17 @@ export function pipelineLineIdentity(line) {
     if (urlIndex === -1) return null;
     localPath = cells[urlIndex].slice('local:'.length).trim();
   }
-  const [company = '', title = ''] = cells.slice(urlIndex + 1);
+  const [company = '', title = '', locationCell = ''] = cells.slice(urlIndex + 1);
+  // The positional location cell, for the location rule. A labelled segment in
+  // that position (`jd:`, `route:` and the rest) is not a location.
+  const location = /^[a-z][a-z_-]*:/i.test(locationCell) ? '' : locationCell;
   // The note cell, not the whole line. The route marker is looked for in a note
   // somebody wrote; searching the line would find it in the company cell, the
   // title, the URL and the jd: filename as well, which is a route decided by a
   // coincidence of spelling.
   const noteCell = cells.find(cell => /^note:/i.test(cell)) || '';
   const note = noteCell ? noteCell.slice(noteCell.indexOf(':') + 1).trim() : '';
-  return { url, company, title, localPath, note };
+  return { url, company, title, localPath, note, location };
 }
 
 // postedAt arrives as epoch ms (or absent). Convert to 'YYYY-MM-DD', or '' when missing.
@@ -3237,6 +3327,7 @@ export async function readPipelineAdverts({
         description: text,
         matchedKeywords: matchedTitleKeywords(identity.title, titleFilterConfig),
         readStatus,
+        location: identity.location,
       });
       if (verdict.drop) {
         const row = {
@@ -3257,7 +3348,10 @@ export async function readPipelineAdverts({
       // Only for a row this pass actually read: an unread advert has no verdict
       // to write, and clearing a label the reader wrote on a better day would
       // lose the only thing the queue knows about its years bar.
-      if (!verdict.unread) workingLine = insertYearsSegment(workingLine, verdict.years ?? null);
+      if (!verdict.unread) {
+        workingLine = insertYearsSegment(workingLine, verdict.years ?? null);
+        workingLine = insertLocationSegment(workingLine, verdict.location ?? null);
+      }
       const routing = routeDetail(identity.company, tiersTable, identity.note, readStatus);
       countRoute(counts.routed, routing);
       lines[i] = insertRouteSegment(workingLine, routing.route);
@@ -4457,6 +4551,7 @@ async function main() {
           description: job.description,
           matchedKeywords: matchedTitleKeywords(job.title, config.title_filter),
           readStatus: job.readStatus ?? null,
+          location: job.location,
         });
         if (verdict.drop) {
           // A years drop counts as a content drop in the per-source ledger and
@@ -4467,6 +4562,9 @@ async function main() {
           if (ledgerReason === 'content') totalFilteredContent++;
           else if (ledgerReason === 'countryEligibility') totalFilteredCountryEligibility++;
           else if (ledgerReason === 'visa') totalFilteredVisa++;
+          // A town outside London counts where the free location filter's
+          // drops count: same ledger key, same run total.
+          else if (ledgerReason === 'location') totalFilteredLocation++;
           sourceLedger.drop(company.name, ledgerReason);
           countAdvertDrop(advertDrops, {
             company: job.company || company.name || '',
@@ -4479,6 +4577,7 @@ async function main() {
           continue;
         }
         if (verdict.years) job.years = verdict.years;
+        if (verdict.location) job.locationLabel = verdict.location;
         const dedupUrl = normalizeUrlForDedup(job.url);
         if (seenUrls.has(dedupUrl)) {
           totalDupes++;
