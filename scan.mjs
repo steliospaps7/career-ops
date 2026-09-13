@@ -2140,6 +2140,23 @@ const UK_PLACE_RE = /^(?:united kingdom|uk|u\.k\.|gb|gbr|great britain|britain|e
 const NOT_A_TOWN_RE = /\b(?:remote|hybrid|home|anywhere|on-?site|office)\b/i;
 const ATTENDANCE_RE = /\bremote(?:ly)?\b|\bwork(?:ing)? from home\b|\bhybrid from anywhere\b|\blondon\b/i;
 
+// What "London" means: the 32 London boroughs, plus the City, which the
+// /london/ test above already reads. This defines London and is not a list of
+// commutable towns: a listing that writes "Harrow, England, United Kingdom" is
+// a London listing, and a town outside these is still read from the advert.
+const LONDON_BOROUGHS = new Set([
+  'barking and dagenham', 'barnet', 'bexley', 'brent', 'bromley', 'camden',
+  'croydon', 'ealing', 'enfield', 'greenwich', 'hackney', 'hammersmith and fulham',
+  'haringey', 'harrow', 'havering', 'hillingdon', 'hounslow', 'islington',
+  'kensington and chelsea', 'kingston upon thames', 'lambeth', 'lewisham',
+  'merton', 'newham', 'redbridge', 'richmond upon thames', 'southwark', 'sutton',
+  'tower hamlets', 'waltham forest', 'wandsworth', 'westminster',
+]);
+
+function isLondonBorough(place) {
+  return LONDON_BOROUGHS.has(String(place).toLowerCase().replace(/\s*&\s*/g, ' and ').replace(/\s+/g, ' ').trim());
+}
+
 /**
  * Where the listing says the job is, read against what the advert says about
  * attendance (ticket C, C4).
@@ -2153,9 +2170,9 @@ const ATTENDANCE_RE = /\bremote(?:ly)?\b|\bwork(?:ing)? from home\b|\bhybrid fro
  * or names London, and is then labelled `remote-uk`; otherwise it is dropped
  * with the town named, which is the brief's "Outside London" hard fail.
  *
- * A London listing, a country on its own, a list of countries and a town with
- * no country word are all left alone: none of them names a UK town outside
- * London.
+ * A London listing, a London borough ("Harrow, England, United Kingdom"), a
+ * country on its own, a list of countries and a town with no country word are
+ * all left alone: none of them names a UK town outside London.
  *
  * @param {string} location - the listing's location cell.
  * @param {string} text - the advert, as stored.
@@ -2168,6 +2185,7 @@ export function judgeAttendance(location, text) {
   const town = parts[0] || '';
   const inTheUk = parts.length >= 2 && parts.slice(1).every(part => UK_PLACE_RE.test(part));
   if (!inTheUk || UK_PLACE_RE.test(town) || NOT_A_TOWN_RE.test(town)) return { drop: false };
+  if (isLondonBorough(town)) return { drop: false };
   if (ATTENDANCE_RE.test(`${listed}\n${String(text ?? '')}`)) return { drop: false, label: 'remote-uk' };
   return { drop: true, town };
 }

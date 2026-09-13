@@ -101,6 +101,24 @@ const NAMES_LONDON = 'Join our team. You need 3 years of product experience. You
   }
 }
 
+// ── A London borough is London (build review of Cb, fix 1) ──────────
+{
+  // Rainbow Fostering's real listing and the shape of its advert: no place, no
+  // way of working, only an apply address. Harrow is a London borough.
+  const HARROW = 'Harrow, England, United Kingdom';
+  const RAINBOW = 'Growth & Operations Associate. You will support our foster carers and grow our referrals. Apply now: jobs@rainbowfostering.co.uk';
+  const harrow = judgeAttendance(HARROW, RAINBOW);
+  eq('Rainbow Fostering in Harrow is kept', harrow.drop, false);
+  eq('as London, not remote-uk', harrow.label, undefined);
+  eq('the gate keeps it with no location label', buildAdvertGate({})({ description: RAINBOW, location: HARROW, readStatus: 'read' }).location, undefined);
+  for (const loc of ['Kingston upon Thames, England, United Kingdom', 'Hammersmith & Fulham, United Kingdom', 'westminster, GB']) {
+    const v = judgeAttendance(loc, OFFICE);
+    ok(`"${loc}" is a borough, kept with no label`, v.drop === false && v.label === undefined);
+  }
+  // Retention of the rule itself: a town outside the boroughs is still read.
+  eq('a town outside the boroughs is still dropped without remote wording', judgeAttendance(AMERSHAM, RAINBOW).drop, true);
+}
+
 // ── The gate: after the read, never on an unread advert ─────────────
 {
   const gate = buildAdvertGate({});
