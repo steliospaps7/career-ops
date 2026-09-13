@@ -114,7 +114,7 @@ shows otherwise after a week, it becomes a follow-up.
 
 **The status, and only `read` feeds the filters.** `liveness-core.mjs`'s `classifyLiveness` is
 reused rather than growing a second classifier. Its codes map to five reader statuses: `read`
-(`apply_control_visible`, or live text above the minimum), `blocked` (`access_blocked`,
+(`apply_control_visible`, or live text of at least `MIN_ADVERT_CHARS`, 300 characters, on every path), `blocked` (`access_blocked`,
 `bot_challenge`, `server_error`), `shell` (`insufficient_content`, `listing_page`,
 `redirected_off_posting`, `no_apply_control`), `expired` (`expired_body`, `expired_url`,
 `http_gone`), `unreadable` (every rung exhausted). There is no login-wall pattern in
@@ -262,8 +262,11 @@ One pull request, open, not merged. The standalone pass over the real queue is S
 after the triage chat is done with the file.
 
 **B3 is done when** one pull request off `upstream/main` maps `postedAt` in the apify plugin and
-stops it swapping the URL column for a local path, and a `local:jds/` row from a paid reader shows
-its posted date on the next scan Stelios runs.
+stops it swapping the URL column for a local path, and a row from a paid reader, its URL cell an
+`https://` URL and its `note:` a `local:jds/` reference, shows its posted date on the next scan
+Stelios runs. That proof holds for an actor that returns an absolute date, which LinkedIn's does;
+Indeed's store page shows a relative date, and a missing `posted:` on an Indeed row is the actor's
+gap, not the fix failing.
 
 ## Out of Scope
 
