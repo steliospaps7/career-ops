@@ -2278,14 +2278,15 @@ export function formatAdvertDropRow(row) {
 
 /** An empty route tally, one counter per bucket. */
 export function emptyRouteTally() {
-  const tally = { score: 0, standard: 0, buckets: {} };
-  for (const bucket of [...ROUTE_BUCKETS.score, ...ROUTE_BUCKETS.standard]) tally.buckets[bucket] = 0;
+  const tally = { score: 0, standard: 0, review: 0, buckets: {} };
+  for (const bucket of [...ROUTE_BUCKETS.score, ...ROUTE_BUCKETS.standard, ...ROUTE_BUCKETS.review]) tally.buckets[bucket] = 0;
   return tally;
 }
 
 export function countRoute(tally, detail) {
   if (!tally || !detail) return;
   if (detail.route === 'score') tally.score++;
+  else if (detail.route === 'review') tally.review = (tally.review || 0) + 1;
   else tally.standard++;
   tally.buckets[detail.bucket] = (tally.buckets[detail.bucket] || 0) + 1;
 }
@@ -2331,6 +2332,12 @@ export function formatGateSummary(dropTally, routeTally) {
       return `${route} ${routeTally[route]}${detail ? `   (${detail})` : ''}`;
     };
     lines.push(`Routes:                ${part('score')}   ${part('standard')}`);
+  }
+
+  // Its own line (ticket C, C2): an unread advert is neither route, and a
+  // count folded into `standard` is the silent pass the route exists to stop.
+  if (routeTally && routeTally.review > 0) {
+    lines.push(`Review:                ${routeTally.review}   unread, a person reads ${routeTally.review === 1 ? 'it' : 'them'} before anything is sent`);
   }
 
   return lines;
@@ -2534,8 +2541,10 @@ export function insertYearsSegment(line, years) {
 
 // The route segment on an existing queue line, e.g. `| route: score`. Read and
 // written by the standalone pass, which labels lines the scan wrote on an
-// earlier day.
-const ROUTE_SEGMENT_RE = /\|\s*route:\s*(score|standard)\b/i;
+// earlier day. `review` is an unread advert's route (ticket C, C2); a value
+// this pattern does not know is never recognised as routed, so every recheck
+// would append a second segment beside it.
+const ROUTE_SEGMENT_RE = /\|\s*route:\s*(score|standard|review)\b/i;
 
 /** The route a queue line already carries, or null. */
 export function extractRouteSegment(line) {
@@ -3065,7 +3074,8 @@ export function formatGateDropReason(row, today = localToday()) {
  *   2. meets the three advert filters on its stored text, and moves to
  *      Processed with the phrase that dropped it when one bites;
  *   3. is labelled `route: score` or `route: standard`, including a line that
- *      was already read on an earlier day and is not read again.
+ *      was already read on an earlier day and is not read again, or
+ *      `route: review` when nobody could read its advert.
  *
  * A row whose stored status is not `read` is never dropped on its advert.
  *
@@ -3180,7 +3190,9 @@ export async function readPipelineAdverts({
         // rather than re-fetched.
         counts.skipped++;
         if (!gate) continue;
-        readStatus = storedStatus(storedPath);
+        // A stored path whose file is gone is an advert nobody read, not a
+        // board description: null would let the route pass it as `standard`.
+        readStatus = storedStatus(storedPath) ?? 'unreadable';
         if (readStatus === 'read') {
           try {
             text = storedText(storedPath) || '';
@@ -3246,7 +3258,7 @@ export async function readPipelineAdverts({
       // to write, and clearing a label the reader wrote on a better day would
       // lose the only thing the queue knows about its years bar.
       if (!verdict.unread) workingLine = insertYearsSegment(workingLine, verdict.years ?? null);
-      const routing = routeDetail(identity.company, tiersTable, identity.note);
+      const routing = routeDetail(identity.company, tiersTable, identity.note, readStatus);
       countRoute(counts.routed, routing);
       lines[i] = insertRouteSegment(workingLine, routing.route);
     }
@@ -4497,9 +4509,10 @@ async function main() {
         // as broad-discovery — ineligible for the fallback, per the issue scope.
         const careersUrlDomain = extractCareersUrlDomain(company.careers_url);
         // The route, decided before any evaluation token is spent. It rides the
-        // queue line as `route: score` or `route: standard`; it never decides
-        // whether the advert is read, which is free and has already happened.
-        const routing = routeDetail(job.company || company.name || '', tiersTable, job.note || '');
+        // queue line as `route: score` or `route: standard`, or `route: review`
+        // when nobody could read the advert; it never decides whether the
+        // advert is read, which is free and has already happened.
+        const routing = routeDetail(job.company || company.name || '', tiersTable, job.note || '', job.readStatus ?? null);
         countRoute(routeTally, routing);
         job.route = routing.route;
         sourceLedger.keep(company.name);
