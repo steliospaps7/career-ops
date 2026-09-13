@@ -2541,10 +2541,17 @@ export function extractJdSegment(line) {
  * serialization matches what formatPipelineOffer writes. A line that already
  * carries one is returned unchanged: the store is the record, and re-reading a
  * posting the run already read is exactly what the idempotent store prevents.
+ *
+ * `replace: true` is the one exception, and the recheck is its one caller: a
+ * segment naming an unread stub is repointed at the apify plugin's file, which
+ * is the advert the gate reads (B3 into the fork).
  */
-export function insertJdSegment(line, relPath) {
-  if (!relPath || extractJdSegment(line)) return line;
+export function insertJdSegment(line, relPath, { replace = false } = {}) {
+  if (!relPath) return line;
   const segment = `| jd: ${sanitizeMarkdownField(`local:${relPath}`)}`;
+  if (extractJdSegment(line)) {
+    return replace ? String(line).replace(JD_SEGMENT_RE, () => segment) : line;
+  }
   const noteAt = line.indexOf('| note:');
   if (noteAt === -1) return `${line.replace(/\s+$/, '')} ${segment}`;
   return `${line.slice(0, noteAt)}${segment} ${line.slice(noteAt)}`;
@@ -2967,6 +2974,13 @@ export function buildAdvertReader({
     unreadableRows: [],
   };
 
+  /** A stored `read` advert, counted under the rung that read it. */
+  function countStoredRead(rung) {
+    tally.read++;
+    const bucket = rung && tally.rungs[rung] != null ? rung : 'stored';
+    tally.rungs[bucket]++;
+  }
+
   async function read({ url, company, title, location }) {
     tally.considered++;
     const identity = { url, company: company || '', title: title || '', location: location || '' };
@@ -2983,9 +2997,7 @@ export function buildAdvertReader({
       const reachedFirecrawl = existing.status !== 'read' && existing.status !== 'expired';
       if (reachedFirecrawl) tally.firecrawlResidue++;
       if (existing.status === 'read') {
-        tally.read++;
-        const rung = existing.rung && tally.rungs[existing.rung] != null ? existing.rung : 'stored';
-        tally.rungs[rung]++;
+        countStoredRead(existing.rung);
       } else {
         tally.unreadable++;
         // Bucketed under what the file actually says, not swept into `other`:
@@ -3038,9 +3050,7 @@ export function buildAdvertReader({
     if (!existing || existing.status !== 'read') return null;
     tally.considered++;
     tally.reused++;
-    tally.read++;
-    const rung = existing.rung && tally.rungs[existing.rung] != null ? existing.rung : 'stored';
-    tally.rungs[rung]++;
+    countStoredRead(existing.rung);
     return { status: 'read', rung: existing.rung, jdPath: existing.path, reused: true, reachedFirecrawl: false };
   }
 
@@ -3120,6 +3130,19 @@ export function formatReadSummary(tally, { firecrawlEnabled = false } = {}) {
 }
 
 /**
+ * The recheck's own count of what it did to the pending lines it kept.
+ * `Unchanged` replaced B1's "Already labelled" (ticket C, C5): every line is
+ * re-gated on every run, so what matters is whether this run changed it.
+ */
+export function formatRecheckSummary(counts) {
+  const rows = (n) => `${n} ${n === 1 ? 'row' : 'rows'}`;
+  return [
+    `Unchanged:             ${rows(counts.unchanged || 0)}`,
+    `Relabelled:            ${rows(counts.changed || 0)}`,
+  ];
+}
+
+/**
  * Mark a pending line processed without losing anything it carried.
  *
  * The queue's older pre-screen shape (`- [x] #-- | <url> | skipped (…)`) throws
@@ -3169,6 +3192,11 @@ export function formatGateDropReason(row, today = localToday()) {
  *
  * A row whose stored status is not `read` is never dropped on its advert.
  *
+ * Every run re-gates every pending line under the current rules and rewrites a
+ * line only when its segments change (ticket C, C5). A line moved to Processed
+ * keeps every cell, its `triage:` verdict included, with the reason appended.
+ * The tracker is read, never written.
+ *
  * `readEntry` is injected so the whole pass is testable against a temporary
  * file with no network and no store.
  *
@@ -3203,6 +3231,10 @@ export async function readPipelineAdverts({
     duplicates: 0,
     duplicateRows: [],
     moved: 0,
+    // Every pending line the pass looked at and did not move (ticket C, C5):
+    // `changed` when the run rewrote it, `unchanged` when it is byte-identical.
+    changed: 0,
+    unchanged: 0,
   };
   if (typeof readEntry !== 'function') throw new Error('readPipelineAdverts: readEntry is required');
   if (!existsSync(pipelinePath)) return counts;
@@ -3220,6 +3252,8 @@ export async function readPipelineAdverts({
     // stay stable while it runs.
     const movedOut = new Set();
     const movedLines = [];
+    // Each pending line as it was read, to count what the run changed.
+    const before = new Map();
 
     for (let i = startIdx + 1; i < endIdx; i++) {
       const line = lines[i];
@@ -3230,6 +3264,7 @@ export async function readPipelineAdverts({
       // An entry already ticked has been dealt with; the Pending section can
       // carry one when a mode moved the state without moving the line.
       if (!/^\s*- \[ \]/.test(line)) continue;
+      before.set(i, line);
 
       const identity = pipelineLineIdentity(line) || { url: '', company: '', title: '' };
 
@@ -3269,7 +3304,7 @@ export async function readPipelineAdverts({
       const alreadyRead = Boolean(storedPath) && !(reread && storedStatus(storedPath) !== 'read');
       // The segment is pointed at the file the gate reads, so triage, which
       // follows `jd:` and does not fetch, reads the advert and not the stub.
-      let workingLine = preferLocal ? line.replace(JD_SEGMENT_RE, `| jd: local:${storedPath}`) : line;
+      let workingLine = preferLocal ? insertJdSegment(line, storedPath, { replace: true }) : line;
       let readStatus = null;
       let text = '';
       let jdPath = storedPath || '';
@@ -3357,6 +3392,12 @@ export async function readPipelineAdverts({
       lines[i] = insertRouteSegment(workingLine, routing.route);
     }
 
+    for (const [i, line] of before) {
+      if (movedOut.has(i)) continue;
+      if (lines[i] === line) counts.unchanged++;
+      else counts.changed++;
+    }
+
     if (movedOut.size > 0) {
       counts.moved = movedOut.size;
       const kept = lines.filter((_, idx) => !movedOut.has(idx));
@@ -3375,7 +3416,9 @@ export async function readPipelineAdverts({
       return;
     }
 
-    atomicWriteFile(pipelinePath, lines.join('\n'));
+    // A run that changed no line leaves the file alone, modified time and all,
+    // so a second run over the same queue is visibly a no-op.
+    if (counts.changed > 0) atomicWriteFile(pipelinePath, lines.join('\n'));
   });
 
   return counts;
@@ -4204,7 +4247,9 @@ async function main() {
     for (const line of formatReadSummary(reader.tally, { firecrawlEnabled: reader.firecrawlEnabled })) {
       console.log(line);
     }
-    console.log(`Already labelled:      ${counts.skipped} ${counts.skipped === 1 ? 'row' : 'rows'} skipped`);
+    for (const line of formatRecheckSummary(counts)) {
+      console.log(line);
+    }
     if (gating) {
       if (counts.duplicates > 0) {
         console.log(`Already tracked:       ${counts.duplicates} moved to Processed`);
