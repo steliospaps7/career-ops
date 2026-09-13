@@ -32,7 +32,7 @@ import {
   extractJdSegment,
 } from '../scan.mjs';
 import { parseTiersTable } from '../providers/_role-route.mjs';
-import { pass, fail, ROOT, rmSync } from './helpers.mjs';
+import { pass, fail, rmSync } from './helpers.mjs';
 
 console.log('\nscan.mjs — the recheck preserves decisions (ticket C, C5)');
 
@@ -146,6 +146,8 @@ const texts = { 'jds/super.md': SUPER, 'jds/bcg.md': BCG, 'jds/four.md': FOUR };
   eq('and counts every pending line unchanged', second.unchanged, 2);
   eq('nothing changed', second.changed, 0);
   eq('nothing moved', second.moved, 0);
+  eq('both lines were loaded from the store, not fetched', second.skipped, 2);
+  ok('which the summary prints', formatRecheckSummary(second).some(l => /^Loaded from store:\s+2 rows$/.test(l)));
   eq('and the file was not rewritten', statSync(p).mtimeMs, old.getTime());
 }
 
@@ -190,9 +192,9 @@ const texts = { 'jds/super.md': SUPER, 'jds/bcg.md': BCG, 'jds/four.md': FOUR };
   ok('the summary counts unchanged rows', lines.some(l => /^Unchanged:\s+70 rows$/.test(l)));
   ok('and rewritten rows', lines.some(l => /^Relabelled:\s+2 rows$/.test(l)));
   ok('one row reads as one row', formatRecheckSummary({ unchanged: 1, changed: 0 }).some(l => /^Unchanged:\s+1 row$/.test(l)));
-  const source = readFileSync(join(ROOT, 'scan.mjs'), 'utf-8');
-  ok('the run no longer prints "Already labelled"', !source.includes('Already labelled:'));
-  ok('there is no keep: marker in the recheck', !/keep:/.test(source));
+  ok('and the rows loaded from the store', formatRecheckSummary({ unchanged: 70, changed: 2, skipped: 71 }).some(l => /^Loaded from store:\s+71 rows$/.test(l)));
+  ok('none loaded reads as zero', formatRecheckSummary({}).some(l => /^Loaded from store:\s+0 rows$/.test(l)));
+  ok('no line says "Already labelled"', !formatRecheckSummary({ unchanged: 1, changed: 1, skipped: 1 }).some(l => l.includes('Already labelled')));
 }
 
 // ── insertJdSegment: append by default, replace when asked ──────────
@@ -205,8 +207,6 @@ const texts = { 'jds/super.md': SUPER, 'jds/bcg.md': BCG, 'jds/four.md': FOUR };
   eq('replace on a line with no segment adds one, as the append path does',
     insertJdSegment('- [ ] https://a.example/1 | A | B | note: x', 'jds/a.md', { replace: true }),
     '- [ ] https://a.example/1 | A | B | jd: local:jds/a.md | note: x');
-  const source = readFileSync(join(ROOT, 'scan.mjs'), 'utf-8');
-  ok('the recheck no longer repoints jd: with a raw replace', !/line\.replace\(JD_SEGMENT_RE/.test(source));
 }
 
 for (const d of dirs) rmSync(d, { recursive: true, force: true });

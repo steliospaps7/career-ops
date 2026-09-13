@@ -3157,10 +3157,13 @@ export function formatReadSummary(tally, { firecrawlEnabled = false } = {}) {
  * The recheck's own count of what it did to the pending lines it kept.
  * `Unchanged` replaced B1's "Already labelled" (ticket C, C5): every line is
  * re-gated on every run, so what matters is whether this run changed it.
+ * `Loaded from store` counts the lines whose advert was already stored and was
+ * not fetched again.
  */
 export function formatRecheckSummary(counts) {
   const rows = (n) => `${n} ${n === 1 ? 'row' : 'rows'}`;
   return [
+    `Loaded from store:     ${rows(counts.skipped || 0)}`,
     `Unchanged:             ${rows(counts.unchanged || 0)}`,
     `Relabelled:            ${rows(counts.changed || 0)}`,
   ];
