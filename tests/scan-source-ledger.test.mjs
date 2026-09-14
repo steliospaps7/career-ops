@@ -72,6 +72,8 @@ const {
     // read the advert, and drops a posting whose own board page says it is gone.
     'advertExpired',
     'content', 'countryEligibility', 'visa', 'duplicate', 'cooldown',
+    // The fit judgement (ticket D2b) runs last in the sweep.
+    'fit',
     // --verify runs after the whole sweep, so its drops come last.
     'expired',
   ];

@@ -86,6 +86,7 @@ import {
   ROUTE_BUCKET_LABELS,
 } from './providers/_role-route.mjs';
 import { extractExperienceClauses } from './providers/_experience-clause.mjs';
+import { readFitGateSettings, buildFitGate, formatFitValue, formatFitSkipReason, formatFitSummary } from './providers/_fit-gate.mjs';
 import { flagValue, hasFlag, validateFlags } from './lib/cli-flags.mjs';
 import { withPortalHealthLock } from './portal-health-lock.mjs';
 import { localToday } from './lib/local-today.mjs';
@@ -2408,7 +2409,14 @@ export function formatGateSummary(dropTally, routeTally) {
   // Its own line (ticket C, C2): an unread advert is neither route, and a
   // count folded into `standard` is the silent pass the route exists to stop.
   if (routeTally && routeTally.review > 0) {
-    lines.push(`Review:                ${routeTally.review}   unread, a person reads ${routeTally.review === 1 ? 'it' : 'them'} before anything is sent`);
+    const them = routeTally.review === 1 ? 'it' : 'them';
+    // A row the fit gate (ticket D2b) held for review is not unread, so the
+    // line names both counts once the gate has held any; without it the line
+    // stays exactly as C2 wrote it.
+    const fitHeld = routeTally.buckets?.fit || 0;
+    lines.push(fitHeld > 0
+      ? `Review:                ${routeTally.review}   (unread: ${routeTally.review - fitHeld}, fit: ${fitHeld}) a person reads ${them} before anything is sent`
+      : `Review:                ${routeTally.review}   unread, a person reads ${them} before anything is sent`);
   }
 
   return lines;
@@ -2540,6 +2548,11 @@ export function formatPipelineOffer(offer) {
   // caller that never routes writes byte-identical lines.
   const route = typeof offer.route === 'string' ? offer.route.trim() : '';
   if (route) line = `${line} | route: ${sanitizeMarkdownField(route)}`;
+  // Labeled fit segment (ticket D2b) — the model's verdict, `PASS`,
+  // `SKIP (<reason>)` or `REVIEW (<reason>)`. After route:, before note:. An
+  // offer the gate never judged produces no segment.
+  const fit = typeof offer.fit === 'string' ? offer.fit.trim() : '';
+  if (fit) line = `${line} | fit: ${sanitizeMarkdownField(fit)}`;
   // Optional free-text ranking signal (e.g. a curated-list flag an importer
   // attaches). Labeled — not positional like location/compensation — so it can
   // ride on any row shape (bare URL, 3-, 4-, or 5-column) without a reader
@@ -2699,6 +2712,18 @@ export function insertRouteSegment(line, route) {
   const noteAt = line.indexOf('| note:');
   if (noteAt === -1) return `${line.replace(/\s+$/, '')} ${segment}`;
   return `${line.slice(0, noteAt)}${segment} ${line.slice(noteAt)}`;
+}
+
+// The fit segment on an existing queue line (ticket D2b), e.g.
+// `| fit: SKIP (the seat runs outsourced contact centres)`. Read, never
+// written, by the standalone pass: a line the gate held for review keeps
+// `route: review` when the pass re-routes it.
+const FIT_SEGMENT_RE = /\|\s*fit:\s*(PASS|SKIP|REVIEW)\b/i;
+
+/** The fit verdict a queue line carries, `PASS`, `SKIP` or `REVIEW`, or null. */
+export function extractFitSegment(line) {
+  const m = String(line).match(FIT_SEGMENT_RE);
+  return m ? m[1].toUpperCase() : null;
 }
 
 /**
@@ -2910,6 +2935,58 @@ export async function appendToPipeline(offers, { pipelinePath = PIPELINE_PATH } 
     }
 
     atomicWriteFile(pipelinePath, text);
+  });
+}
+
+/**
+ * Add already-ticked lines to the end of the Processed block, under the same
+ * lock appendToPipeline takes. The fit gate's SKIPs (ticket D2b) go here, so a
+ * rejected row is recorded once and never enters Pending.
+ */
+export async function appendProcessedToPipeline(lines, { pipelinePath = PIPELINE_PATH } = {}) {
+  if (!Array.isArray(lines) || lines.length === 0) return;
+
+  await withPipelineLock(pipelinePath, async () => {
+    const text = existsSync(pipelinePath)
+      ? readFileSync(pipelinePath, 'utf-8')
+      : PIPELINE_SKELETON;
+    const all = text.split('\n');
+    const procIdx = all.findIndex(l => PROCESSED_MARKERS.some(m => l.trim() === m));
+    if (procIdx === -1) {
+      while (all.length > 0 && all[all.length - 1].trim() === '') all.pop();
+      all.push('', '## Processed', '', ...lines, '');
+    } else {
+      let insertAt = all.length;
+      for (let i = procIdx + 1; i < all.length; i++) {
+        if (all[i].startsWith('## ')) { insertAt = i; break; }
+      }
+      while (insertAt > procIdx + 1 && all[insertAt - 1].trim() === '') insertAt--;
+      // A Processed heading with nothing under it yet gets its blank line.
+      const lead = insertAt === procIdx + 1 ? [''] : [];
+      all.splice(insertAt, 0, ...lead, ...lines);
+    }
+    atomicWriteFile(pipelinePath, all.join('\n'));
+  });
+}
+
+/**
+ * The fit judgement for one row the sweep is about to queue (ticket D2b).
+ *
+ * The advert is the row's description, which the reader or the board already
+ * filled, or failing that the stored file its `jd:` path names. Returns the
+ * gate's outcome, which is never a thrown error: every failure is REVIEW.
+ */
+export async function assessFit(job, gate, companyName = '', { jdsDir = JDS_DIR } = {}) {
+  let advert = typeof job.description === 'string' ? job.description : '';
+  if (!advert.trim() && job.jdPath && (job.readStatus == null || job.readStatus === 'read')) {
+    advert = loadAdvertText(job.jdPath, { jdsDir });
+  }
+  return gate.assess({
+    company: job.company || companyName || '',
+    title: job.title || '',
+    location: job.location || '',
+    advert,
+    readStatus: job.readStatus ?? null,
   });
 }
 
@@ -3425,7 +3502,14 @@ export async function readPipelineAdverts({
         workingLine = insertYearsSegment(workingLine, verdict.years ?? null);
         workingLine = insertLocationSegment(workingLine, verdict.location ?? null);
       }
-      const routing = routeDetail(identity.company, tiersTable, identity.note, readStatus);
+      let routing = routeDetail(identity.company, tiersTable, identity.note, readStatus);
+      // This pass does not judge fit (ticket D2b) and never writes `fit:`, but
+      // a line the scan's gate held for review stays `review`: re-routing it on
+      // the tier would put a SKIP or a REVIEW back on the standard pack.
+      const heldFit = extractFitSegment(line);
+      if (heldFit && heldFit !== 'PASS' && routing.route !== 'review') {
+        routing = { ...routing, route: 'review', bucket: 'fit' };
+      }
       countRoute(counts.routed, routing);
       lines[i] = insertRouteSegment(workingLine, routing.route);
     }
@@ -3687,6 +3771,9 @@ export const SOURCE_DROP_REASONS = [
   { key: 'visa', label: 'visa' },
   { key: 'duplicate', label: 'duplicate' },
   { key: 'cooldown', label: 'cooldown' },
+  // The fit judgement (ticket D2b) runs last in the sweep, after the route, and
+  // counts here only when its SKIP switch is on and the row left the queue.
+  { key: 'fit', label: 'fit' },
   // Not a sweep filter — --verify runs after the sweep and drops postings
   // whose page is gone, has no Apply control, or failed the URL guard.
   { key: 'expired', label: 'expired' },
@@ -4448,6 +4535,17 @@ async function main() {
   const seenUrls = dedupSnapshot.seen;
   const seenCompanyRoles = dedupSnapshot.seenCompanyRoles;
 
+  // 4.5. The fit judgement (ticket D2b). Off unless config/profile.yml says
+  // `fit_gate: enabled: true`; with it off nothing below calls a model and the
+  // run prints and writes exactly what it did before.
+  const fitSettings = readFitGateSettings(PROFILE_PATH, { root: DATA_ROOT });
+  const fitGate = fitSettings.enabled ? buildFitGate(fitSettings, { canonicalize: canonicalizeCompany }) : null;
+  if (fitGate) {
+    console.log(`Fit gate on: ${fitSettings.model}, effort ${fitSettings.effort}, SKIP switch ${fitSettings.skip ? 'on' : 'off'}, at most ${fitSettings.maxRows} rows and ${Math.round(fitSettings.budgetMs / 60_000)} min`);
+  }
+  let totalFilteredFit = 0;
+  const fitSkippedOffers = [];
+
   // 5. Fetch from each target
   // LOCAL day. This one value does two things that both care which day it is:
   // it is the `today` buildCooldownFilter compares against, and it is the
@@ -4489,7 +4587,7 @@ async function main() {
       boards: targets.filter(t => t._isBoard).length,
       found: totalFound, filteredTitle: totalFilteredTitle, filteredTier: totalFilteredTier,
       filteredLocation: totalFilteredLocation, filteredPostingAge: totalFilteredPostingAge,
-      filteredSalary: totalFilteredSalary, filteredContent: totalFilteredContent,
+      filteredSalary: totalFilteredSalary, filteredContent: totalFilteredContent + totalFilteredFit,
       filteredCooldown: totalFilteredCooldown, dupes: totalDupes, newAdded: 0,
       errors: errors.length, filteredBlacklist: totalFilteredBlacklist,
       filteredVisa: totalFilteredVisa, filteredPostedDate: totalFilteredPostedDate,
@@ -4694,7 +4792,25 @@ async function main() {
         // queue line as `route: score` or `route: standard`, or `route: review`
         // when nobody could read the advert; it never decides whether the
         // advert is read, which is free and has already happened.
-        const routing = routeDetail(job.company || company.name || '', tiersTable, job.note || '', job.readStatus ?? null);
+        let routing = routeDetail(job.company || company.name || '', tiersTable, job.note || '', job.readStatus ?? null);
+        // The fit judgement (ticket D2b), for every row about to be queued,
+        // whatever its tier: the tier decides attention, not whether fit is
+        // checked. A SKIP leaves the queue only with the SKIP switch on and the
+        // company not under always_allow; otherwise it stays, like a REVIEW, as
+        // `route: review` with the verdict on the line.
+        if (fitGate) {
+          const fit = await assessFit(job, fitGate, company.name);
+          if (fit.verdict === 'SKIP' && !fit.held) {
+            totalFilteredFit++;
+            sourceLedger.drop(company.name, 'fit');
+            fitSkippedOffers.push({ ...job, route: routing.route, source: sourceName, fitReason: fit.reason });
+            continue;
+          }
+          job.fit = formatFitValue(fit);
+          if (fit.verdict !== 'PASS' && routing.route !== 'review') {
+            routing = { ...routing, route: 'review', bucket: 'fit' };
+          }
+        }
         countRoute(routeTally, routing);
         job.route = routing.route;
         sourceLedger.keep(company.name);
@@ -4779,6 +4895,7 @@ async function main() {
     visa: totalFilteredVisa,
     duplicate: totalDupes,
     cooldown: totalFilteredCooldown,
+    fit: totalFilteredFit,
     expired: expiredOffers.length + droppedOffers.length + invalidOffers.length,
   });
   if (ledgerMismatches.length > 0) {
@@ -4806,6 +4923,16 @@ async function main() {
   if (!dryRun && verifiedOffers.length > 0) {
     await appendToPipeline(verifiedOffers);
     await appendToScanHistory(verifiedOffers, date);
+  }
+  // The fit gate's SKIPs (ticket D2b), recorded once: a ticked line in
+  // Processed with every cell kept and the reason appended, and the URL in
+  // scan-history under a status the dedup honours, so no later scan assesses
+  // the row again.
+  if (!dryRun && fitSkippedOffers.length > 0) {
+    await appendProcessedToPipeline(fitSkippedOffers.map(
+      (offer) => markPipelineLineProcessed(formatPipelineOffer(offer), sanitizeMarkdownField(formatFitSkipReason(offer.fitReason, date))),
+    ));
+    await appendToScanHistory(fitSkippedOffers, date, 'skipped_fit');
   }
   if (!dryRun && cooldownOffers.length > 0) {
     const cooldownGroups = {};
@@ -4919,6 +5046,11 @@ async function main() {
     // advert it was read from.
     for (const row of advertDrops.rows) {
       console.log(formatAdvertDropRow(row));
+    }
+    // The fit gate's summary line and one line per SKIP and REVIEW (ticket
+    // D2b). Nothing when the gate is off.
+    if (fitGate) {
+      for (const line of formatFitSummary(fitGate)) console.log(line);
     }
   }
   if (blacklist.size > 0) {
@@ -5083,7 +5215,10 @@ async function main() {
       filteredTitle: totalFilteredTitle, filteredTier: totalFilteredTier,
       filteredLocation: totalFilteredLocation, filteredPostingAge: totalFilteredPostingAge,
       filteredSalary: totalFilteredSalary,
-      filteredContent: totalFilteredContent, filteredCooldown: totalFilteredCooldown,
+      // A fit SKIP read the advert, like a years drop, and scan-runs.tsv has
+      // no column of its own for it: its header is a guarded contract. The
+      // per-source log and the summary name it as `fit`.
+      filteredContent: totalFilteredContent + totalFilteredFit, filteredCooldown: totalFilteredCooldown,
       dupes: totalDupes, newAdded: verifiedOffers.length, errors: errors.length,
       filteredBlacklist: totalFilteredBlacklist,
       filteredVisa: totalFilteredVisa,
@@ -5101,7 +5236,7 @@ async function main() {
     const filtered = totalFilteredTitle + totalFilteredTier + totalFilteredLocation
       + totalFilteredPostingAge + totalFilteredPostedDate + totalFilteredSalary
       + totalFilteredContent + totalFilteredCountryEligibility + totalFilteredBlacklist
-      + totalFilteredVisa + totalFilteredCooldown;
+      + totalFilteredVisa + totalFilteredCooldown + totalFilteredFit;
     emitJsonReceipt({
       version: 'careerops.scan.receipt@1',
       date,
