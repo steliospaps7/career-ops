@@ -283,7 +283,7 @@ export function createFitGate({ settings, rules, rulesError = '', judge, canonic
 }
 
 /** The gate the scan runs: the rules loaded from the settings' paths, the call through `claude`. */
-export function buildFitGate(settings, { canonicalize, judge = null } = {}) {
+export function buildFitGate(settings, { canonicalize } = {}) {
   let rules = null;
   let rulesError = '';
   try {
@@ -292,7 +292,7 @@ export function buildFitGate(settings, { canonicalize, judge = null } = {}) {
   } catch (err) {
     rulesError = err?.message || String(err);
   }
-  return createFitGate({ settings, rules, rulesError, judge: judge || claudeJudge(settings), canonicalize });
+  return createFitGate({ settings, rules, rulesError, judge: claudeJudge(settings), canonicalize });
 }
 
 // The `fit:` value lives in `_fit-prompt.mjs`, which imports nothing but `fs`,

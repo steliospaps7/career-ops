@@ -2727,6 +2727,16 @@ export function extractFitSegment(line) {
 }
 
 /**
+ * The hold rule, shared by the sweep and the standalone pass: a row whose fit
+ * verdict is SKIP or REVIEW is routed `review`, counted under the `fit` bucket.
+ * A PASS, no verdict, or a row already routed `review` keeps its routing.
+ */
+export function holdRouteForFit(routing, verdict) {
+  if (!verdict || verdict === 'PASS' || routing.route === 'review') return routing;
+  return { ...routing, route: 'review', bucket: 'fit' };
+}
+
+/**
  * Company and title from a queue line, for the tracker dedup and the route.
  *
  * `extractPipelineCompanyRole` is the scan's own dedup reader and deliberately
@@ -3502,14 +3512,13 @@ export async function readPipelineAdverts({
         workingLine = insertYearsSegment(workingLine, verdict.years ?? null);
         workingLine = insertLocationSegment(workingLine, verdict.location ?? null);
       }
-      let routing = routeDetail(identity.company, tiersTable, identity.note, readStatus);
       // This pass does not judge fit (ticket D2b) and never writes `fit:`, but
       // a line the scan's gate held for review stays `review`: re-routing it on
       // the tier would put a SKIP or a REVIEW back on the standard pack.
-      const heldFit = extractFitSegment(line);
-      if (heldFit && heldFit !== 'PASS' && routing.route !== 'review') {
-        routing = { ...routing, route: 'review', bucket: 'fit' };
-      }
+      const routing = holdRouteForFit(
+        routeDetail(identity.company, tiersTable, identity.note, readStatus),
+        extractFitSegment(line),
+      );
       countRoute(counts.routed, routing);
       lines[i] = insertRouteSegment(workingLine, routing.route);
     }
@@ -4807,9 +4816,7 @@ async function main() {
             continue;
           }
           job.fit = formatFitValue(fit);
-          if (fit.verdict !== 'PASS' && routing.route !== 'review') {
-            routing = { ...routing, route: 'review', bucket: 'fit' };
-          }
+          routing = holdRouteForFit(routing, fit.verdict);
         }
         countRoute(routeTally, routing);
         job.route = routing.route;
