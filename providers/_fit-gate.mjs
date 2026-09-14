@@ -99,10 +99,11 @@ export function claudeJudgeArgs({ model, effort }) {
  * stdin and cwd a temp folder. Resolves `{text, models}`, where `models` is
  * every key of the envelope's `modelUsage` (the model that answered, and any
  * side call the CLI made). Rejects on a non-zero exit, an envelope that is not
- * JSON, an envelope marked `is_error`, and on `signal` aborting, which kills
- * the child.
+ * JSON, an envelope marked `is_error`, and on `signal` aborting, which sends
+ * the child SIGTERM and, if it is still running `killGraceMs` later, SIGKILL,
+ * so a child that ignores SIGTERM cannot hold the scan open.
  */
-export function claudeJudge({ command = ['claude'], model, effort }) {
+export function claudeJudge({ command = ['claude'], model, effort, killGraceMs = 2000 }) {
   const [bin, ...lead] = command;
   const args = [...lead, ...claudeJudgeArgs({ model, effort })];
   return (prompt, { signal } = {}) => new Promise((resolve, reject) => {
@@ -110,6 +111,8 @@ export function claudeJudge({ command = ['claude'], model, effort }) {
     let stdout = '';
     let stderr = '';
     let settled = false;
+    let killTimer = null;
+    child.on('close', () => { if (killTimer) clearTimeout(killTimer); });
     const finish = (fn, value) => {
       if (settled) return;
       settled = true;
@@ -118,6 +121,9 @@ export function claudeJudge({ command = ['claude'], model, effort }) {
     };
     const onAbort = () => {
       child.kill('SIGTERM');
+      killTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      }, killGraceMs);
       finish(reject, new Error('aborted'));
     };
     if (signal) {
@@ -233,8 +239,10 @@ export function createFitGate({ settings, rules, rulesError = '', judge, canonic
           judge(buildFitPrompt({ ...rules, advert, company: row.company, title: row.title, location: row.location }), { signal: controller.signal }),
           new Promise((_, reject) => {
             timer = setTimeout(() => {
-              controller.abort();
+              // Reject before aborting: the real judge rejects synchronously on
+              // abort, and the race must settle on the timeout's reason.
               reject(Object.assign(new Error(`timed out after ${Math.round(timeoutMs / 1000)} s`), { timedOut: true }));
+              controller.abort();
             }, timeoutMs);
           }),
         ]);

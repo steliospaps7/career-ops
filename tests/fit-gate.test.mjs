@@ -23,6 +23,7 @@ import { tmpdir } from 'os';
 import { execFileSync } from 'child_process';
 import {
   createFitGate,
+  claudeJudge,
   readFitGateSettings,
   claudeJudgeArgs,
   formatFitValue,
@@ -117,6 +118,30 @@ async function suite() {
     const timedOut = await slow.assess(row());
     ok('a call past its timeout is REVIEW and failed', timedOut.verdict === 'REVIEW' && timedOut.failed && /timed out/.test(timedOut.reason));
     ok('and the call is told to stop', aborted);
+
+    // A real child that ignores SIGTERM: the call still ends as REVIEW, and the
+    // child is killed after the grace, so nothing holds the scan open.
+    {
+      const dir = tempDir();
+      const script = join(dir, 'stubborn-judge.mjs');
+      const pidFile = join(dir, 'pid');
+      writeFileSync(script, `import { writeFileSync } from 'fs';\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid));\nprocess.on('SIGTERM', () => {});\nsetInterval(() => {}, 1000);\n`);
+      const stubborn = createFitGate({
+        settings: { ...SETTINGS, callTimeoutMs: 300 },
+        rules: RULES,
+        judge: claudeJudge({ command: [NODE, script], model: 'm', effort: 'e', killGraceMs: 200 }),
+      });
+      const outcome = await stubborn.assess(row());
+      ok('a judge that ignores SIGTERM still ends the call as REVIEW, named as a timeout', outcome.verdict === 'REVIEW' && /timed out/.test(outcome.reason));
+      const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+      const pid = Number(readFileSync(pidFile, 'utf-8'));
+      let gone = false;
+      for (let i = 0; i < 40 && !gone; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        gone = !alive(pid);
+      }
+      ok('and the child is killed after the grace, so it cannot hold the process open', gone);
+    }
 
     const prose = await gateWith(async () => ({ text: 'I think this is a PASS.' })).assess(row());
     ok('an answer that is not JSON is REVIEW and failed', prose.verdict === 'REVIEW' && prose.failed && /not JSON/.test(prose.reason));
