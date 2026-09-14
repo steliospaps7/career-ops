@@ -230,7 +230,7 @@ export function createFitGate({ settings, rules, rulesError = '', judge, canonic
       let answer;
       try {
         answer = await Promise.race([
-          judge(buildFitPrompt({ ...rules, advert }), { signal: controller.signal }),
+          judge(buildFitPrompt({ ...rules, advert, company: row.company, title: row.title, location: row.location }), { signal: controller.signal }),
           new Promise((_, reject) => {
             timer = setTimeout(() => {
               controller.abort();
