@@ -26,7 +26,7 @@ import { existsSync, readFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import * as yaml from 'js-yaml';
-import { buildFitPrompt, parseFitAnswer, loadFitRules, FIT_SYSTEM_PROMPT } from './_fit-prompt.mjs';
+import { buildFitPrompt, parseFitAnswer, loadFitRules, formatFitValue, FIT_SYSTEM_PROMPT } from './_fit-prompt.mjs';
 
 /** At most this many calls in the air across the whole sweep. Not configurable. */
 export const FIT_GATE_CONCURRENCY = 3;
@@ -277,11 +277,9 @@ export function buildFitGate(settings, { canonicalize, judge = null } = {}) {
   return createFitGate({ settings, rules, rulesError, judge: judge || claudeJudge(settings), canonicalize });
 }
 
-/** The value of a queue line's `fit:` segment, before sanitising. */
-export function formatFitValue(outcome) {
-  if (!outcome) return '';
-  return outcome.verdict === 'PASS' ? 'PASS' : `${outcome.verdict} (${oneLine(outcome.reason)})`;
-}
+// The `fit:` value lives in `_fit-prompt.mjs`, which imports nothing but `fs`,
+// so the dashboard's parity test can import the one definition.
+export { formatFitValue };
 
 /** The reason on a SKIP line moved to Processed. */
 export function formatFitSkipReason(reason, date) {

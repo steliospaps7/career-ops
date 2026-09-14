@@ -142,3 +142,14 @@ export function parseFitAnswer(stdout, advert) {
   if (typeof excerpt !== 'string' || !excerpt.trim()) return { ok: false, error: 'missing excerpt' };
   return { ok: true, verdict, reason: reason.trim(), excerpt: excerpt.trim(), excerptFound: excerptInAdvert(excerpt, advert) };
 }
+
+/**
+ * The value of a queue line's `fit:` segment, before the scan sanitises it
+ * (ticket D2b): `PASS`, or `SKIP (<reason>)` / `REVIEW (<reason>)` on one line.
+ * The one definition; the dashboard's reader is tested against it.
+ */
+export function formatFitValue(outcome) {
+  if (!outcome) return '';
+  const reason = String(outcome.reason ?? '').replace(/\s+/g, ' ').trim();
+  return outcome.verdict === 'PASS' ? 'PASS' : `${outcome.verdict} (${reason})`;
+}

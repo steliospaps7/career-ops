@@ -7,6 +7,24 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseInboxLine, fitCardLine } from "../../src/lib/inbox-line.mjs";
+// The core's one definition of the `fit:` value (ticket D2b). It imports only
+// `fs`, so web's own CI, which installs web's packages alone, can load it.
+import { formatFitValue } from "../../../providers/_fit-prompt.mjs";
+
+test("parity: the card reads every fit: value the core writes", () => {
+  const reason = "a Manager grade at that band is a stretch (4 September), and the rules pull both ways";
+  for (const [verdict, card] of [
+    ["PASS", "PASS"],
+    ["SKIP", `review: ${reason}`],
+    ["REVIEW", `review: ${reason}`],
+  ]) {
+    const value = formatFitValue({ verdict, reason });
+    const line = `- [ ] https://jobs.example.com/p | Acme | Analyst | London | route: review | fit: ${value} | note: x`;
+    const job = parseInboxLine(line);
+    assert.equal(job.fit, value, `${verdict}: the segment reads back whole`);
+    assert.equal(fitCardLine(job), card, `${verdict}: the card line`);
+  }
+});
 
 test("a line carrying fit: SKIP (reason) reaches the card with that reason", () => {
   const line = "- [ ] https://jobs.example.com/1 | Acme | Care Operations Manager | London | jd: local:jds/acme-care.md | route: review | fit: SKIP (the seat runs outsourced contact centres) | note: via board";
