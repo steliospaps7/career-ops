@@ -185,6 +185,22 @@ async function suite() {
     const first = await budgeted.assess(row());
     const second = await budgeted.assess(row({ title: 'Second' }));
     ok('a row after the time budget is spent is REVIEW', first.verdict === 'PASS' && second.verdict === 'REVIEW' && second.ceiling);
+
+    // Rows refused on the budget make no call and never read as the row ceiling.
+    let spent = 0;
+    let made = 0;
+    const tight = createFitGate({
+      settings: { ...SETTINGS, budgetMs: 1000, maxRows: 2 },
+      rules: RULES,
+      now: () => spent,
+      judge: async () => { made++; spent += 1500; return answer('PASS'); },
+    });
+    const refused = [];
+    for (let i = 0; i < 6; i++) refused.push(await tight.assess(row({ title: `Row ${i}` })));
+    const reasons = refused.slice(1).map((o) => o.reason);
+    ok('every row after the budget says budget, none says row ceiling',
+      reasons.every((r) => /time budget spent/.test(r)) && !reasons.some((r) => /row ceiling/.test(r)));
+    ok('and only the call actually made is counted', made === 1 && tight.tally.calls === 1 && tight.tally.ceilingHits === 5);
   }
 
   // ── One limiter across the sweep ───────────────────────────────────

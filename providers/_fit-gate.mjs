@@ -173,6 +173,7 @@ export function createFitGate({ settings, rules, rulesError = '', judge, canonic
   const allow = new Set((settings.alwaysAllow || []).map((c) => canonicalize(c)));
   const tally = { assessed: 0, pass: 0, skip: 0, review: 0, failed: 0, ceilingHits: 0, calls: 0, models: new Map(), rows: [] };
   let firstCallAt = null;
+  let reserved = 0;
   let active = 0;
   const waiters = [];
 
@@ -218,10 +219,17 @@ export function createFitGate({ settings, rules, rulesError = '', judge, canonic
     if (!rules) {
       return record(row, review(`rules not loaded: ${oneLine(rulesError) || 'unknown'}`, { failed: true }));
     }
-    if (tally.calls >= settings.maxRows) {
+    const budgetSpent = () => review(`time budget spent (${Math.round(settings.budgetMs / 60_000)} min per run)`, { ceiling: true });
+    if (firstCallAt != null && now() - firstCallAt >= settings.budgetMs) {
+      return record(row, budgetSpent());
+    }
+    // A slot under the row ceiling is taken before waiting for the limiter, so
+    // rows waiting in parallel cannot overshoot it, and given back if the row is
+    // refused on the budget, so a budget refusal never reads as the row ceiling.
+    if (reserved >= settings.maxRows) {
       return record(row, review(`row ceiling reached (${settings.maxRows} per run)`, { ceiling: true }));
     }
-    tally.calls++;
+    reserved++;
     await acquire();
     let controller = null;
     let timer = null;
@@ -229,8 +237,10 @@ export function createFitGate({ settings, rules, rulesError = '', judge, canonic
       if (firstCallAt == null) firstCallAt = now();
       const remaining = settings.budgetMs - (now() - firstCallAt);
       if (remaining <= 0) {
-        return record(row, review(`time budget spent (${Math.round(settings.budgetMs / 60_000)} min per run)`, { ceiling: true }));
+        reserved--;
+        return record(row, budgetSpent());
       }
+      tally.calls++;
       const timeoutMs = Math.min(settings.callTimeoutMs, remaining);
       controller = new AbortController();
       let answer;
