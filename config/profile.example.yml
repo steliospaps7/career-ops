@@ -319,3 +319,31 @@ cover_letter:
 #     cross_role_bucket: "all_EM_roles"
 #     applied_to: ["Senior Software Engineer"]
 #     last_apply_date: "2026-01-01"
+
+# ── Fit Gate (optional, off unless enabled) ────────────────────────────────
+#
+# Before a new role reaches data/pipeline.md, the scanner can ask a model,
+# through your own `claude` command and subscription, whether the advert is a
+# fit: PASS, SKIP or REVIEW with a reason and a quoted sentence. With this
+# block absent, or enabled not true, the scanner never calls a model.
+#
+#   enabled       — true turns the gate on. Default: off.
+#   skip          — true lets a SKIP leave the queue (ticked in Processed and
+#                   recorded in scan-history so it is never assessed again).
+#                   Off: a SKIP stays queued as `route: review`. Default: off.
+#   model, effort — passed to `claude -p`. Default: claude-opus-5, medium.
+#   brief_path    — your triage brief. Default: modes/_brief.md.
+#   criteria_path — your role criteria file. Required when enabled.
+#   max_rows, budget_minutes, call_timeout_seconds — per-run ceilings; rows
+#                   past them are queued as review. Defaults: 100, 30, 180.
+#   always_allow  — company names never SKIPped out of the queue.
+#   command       — the claude executable and any leading arguments.
+#                   Default: ["claude"].
+#
+# fit_gate:
+#   enabled: false
+#   skip: false
+#   model: claude-opus-5
+#   effort: medium
+#   criteria_path: path/to/role-criteria.md
+#   always_allow: []

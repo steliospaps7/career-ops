@@ -5,6 +5,7 @@ import { Bookmark, BookmarkCheck, Loader2, X } from "lucide-react";
 import type { InboxJob } from "@/lib/career-ops";
 import type { AtsSource } from "@/lib/explore";
 import { ATS_LABEL } from "@/lib/explore";
+import { fitCardLine } from "@/lib/inbox-line.mjs";
 import { Badge } from "@/components/ui/badge";
 import { CompanyLogo } from "@/components/company-logo";
 import { cn } from "@/lib/cn";
@@ -46,6 +47,9 @@ export function TriageRow({
 }) {
   const ago = agoLabel(age);
   const evaluated = !!scored && (scored.running || scored.score != null);
+  // The fit judgement's verdict from the queue line (ticket D2b): `PASS` or
+  // `review: <reason>`, nothing when the row was never judged.
+  const fitLine = fitCardLine(job);
 
   return (
     <li
@@ -78,6 +82,7 @@ export function TriageRow({
           {/* 🔴 CRUDA: honest "not scored" — no fabricated match%. */}
           {!evaluated && <span className="italic text-muted">not scored</span>}
         </p>
+        {fitLine && <p className="mt-0.5 truncate text-[11px] text-muted" title={fitLine}>{fitLine}</p>}
       </div>
 
       {/* EVALUADA state (right-aligned, visually distinct from raw rows) */}

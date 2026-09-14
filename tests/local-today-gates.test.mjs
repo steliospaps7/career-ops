@@ -553,7 +553,8 @@ test('the call scanner sees code and only code', () => {
 test('the scanner resolves every call the four known writers contain', () => {
   // The shapes above are synthetic. This is the real files, and it is what
   // would catch masking that is correct in miniature and wrong at scale.
-  for (const [file, expected] of [['scan.mjs', 5], ['scan-ats-full.mjs', 1], ['scan-hn.mjs', 1], ['scan-interamt.mjs', 5]]) {
+  // scan.mjs: 6 since ticket D2b added the fit gate's `skipped_fit` write.
+  for (const [file, expected] of [['scan.mjs', 6], ['scan-ats-full.mjs', 1], ['scan-hn.mjs', 1], ['scan-interamt.mjs', 5]]) {
     const src = readFileSync(join(ROOT, file), 'utf-8');
     const naive = [...src.matchAll(/(?<!function )\bappendToScanHistory\s*\(/g)].length;
     assert.equal(naive, expected, `${file}: expected ${expected} call sites, source has ${naive} — update this expectation deliberately`);
