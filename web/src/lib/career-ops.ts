@@ -7,6 +7,7 @@ import { parseApplications } from "@/lib/tracker-table.mjs";
 // run-cli-support.mjs — see report-files.mjs for why it lives there.
 import { isReservedReportFile } from "@/lib/report-files.mjs";
 import { parseInboxLine } from "@/lib/inbox-line.mjs";
+import { markTrackedInbox } from "@/lib/inbox-tracked.mjs";
 import { resolvePdfIndexPath } from "@/lib/core/pdf-index";
 // Pure parser, no I/O — shared with the apply flow's CV resolver so the two
 // don't drift into two different definitions of "which report does this
@@ -252,13 +253,18 @@ export type PipelineSummary = {
 export function pipelineSummary(): PipelineSummary {
   const root = careerOpsRoot();
   const scanDates = readScanDates();
+  const applications = readApplications();
   return {
     root,
     rootExists: fs.existsSync(root),
     // join the freshness date (first_seen) onto each raw posting — the inbox's
-    // triage view orders/faceted-filters on it entirely client-side.
-    inbox: readInbox().map((j) => ({ ...j, postedAt: j.postedAt ?? scanDates.get(j.url) })),
-    applications: readApplications(),
+    // triage view orders/faceted-filters on it entirely client-side. A row the
+    // tracker already holds is done, ticked or not (see inbox-tracked.mjs).
+    inbox: markTrackedInbox(
+      readInbox().map((j) => ({ ...j, postedAt: j.postedAt ?? scanDates.get(j.url) })),
+      applications,
+    ),
+    applications,
   };
 }
 
