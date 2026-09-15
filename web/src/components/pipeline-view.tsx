@@ -11,6 +11,7 @@ import { canonStatus, scoreNum, scoreTone, statusDot } from "@/lib/format";
 import { InboxTriage } from "@/components/inbox/inbox-triage";
 import { cn } from "@/lib/cn";
 import { companyPresentation, companySearchText } from "@/lib/company-presentation.mjs";
+import { countNotHidden } from "@/lib/inbox-order.mjs";
 
 // INBOX (the triage queue) is the default tab; the rest filter the tracker.
 const TABS = [
@@ -30,6 +31,10 @@ type Tab = (typeof TABS)[number];
 
 const SORT_KEYS = ["company", "role", "score", "status", "date"] as const;
 type SortKey = (typeof SORT_KEYS)[number];
+
+// Rows hidden with X on the inbox. Kept in this browser's localStorage only: an X
+// never reaches pipeline.md, and another browser or device still shows the row.
+const HIDDEN_KEY = "career-ops:hidden";
 
 export function PipelineView({
   applications,
@@ -91,6 +96,24 @@ export function PipelineView({
     return out;
   }, [inbox]);
 
+  // Held here, not in InboxTriage, so the header and tab count leave out the rows
+  // hidden with X, the same rows the triage list leaves out.
+  const [hidden, setHidden] = useState<string[]>([]);
+  const [hiddenLoaded, setHiddenLoaded] = useState(false);
+  useEffect(() => {
+    try {
+      const h = localStorage.getItem(HIDDEN_KEY);
+      if (h) setHidden(JSON.parse(h));
+    } catch {
+      /* ignore */
+    }
+    setHiddenLoaded(true);
+  }, []);
+  useEffect(() => {
+    if (hiddenLoaded) try { localStorage.setItem(HIDDEN_KEY, JSON.stringify(hidden)); } catch { /* quota */ }
+  }, [hidden, hiddenLoaded]);
+  const inboxCount = useMemo(() => countNotHidden(pendingInbox, hidden), [pendingInbox, hidden]);
+
   const filtered = useMemo(() => {
     if (tab === "INBOX") return [];
     let rows = applications;
@@ -125,7 +148,7 @@ export function PipelineView({
         <div>
           <h1 className="font-display text-2xl tracking-tight text-landing">Pipeline</h1>
           <p className="mt-1 text-sm text-muted">
-            <span className="tabular-nums">{pendingInbox.length}</span> in inbox ·{" "}
+            <span className="tabular-nums">{inboxCount}</span> in inbox ·{" "}
             <span className="tabular-nums">{applications.length}</span> tracked
           </p>
         </div>
@@ -148,7 +171,7 @@ export function PipelineView({
         {TABS.map((t) => {
           const count =
             t === "INBOX"
-              ? pendingInbox.length
+              ? inboxCount
               : t === "ALL"
                 ? applications.length
                 : applications.filter((r) => canonStatus(r.status).includes(t)).length;
@@ -189,7 +212,7 @@ export function PipelineView({
       {tab === "INBOX" ? (
         /* ── Inbox: the triage surface (Abundance → Triage → Shortlist → Score) ── */
         pendingInbox.length > 0 ? (
-          <InboxTriage inbox={pendingInbox} />
+          <InboxTriage inbox={pendingInbox} hidden={hidden} setHidden={setHidden} />
         ) : (
           <InboxEmpty count={0} filtered={false} />
         )
