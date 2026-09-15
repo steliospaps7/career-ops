@@ -15,6 +15,12 @@
  * first. pipeline.md lines carry no scan date of their own, only `posted:`,
  * so the history is the one source.
  *
+ * One URL listed twice is one row, and the earlier line is the one kept: it is
+ * the one the scan wrote with its labels (posted:, fit:, jd:), and a later bare
+ * re-add must not replace it. An earlier ticked line gives way to a later
+ * unticked one, as the inbox's first-pending dedupe always did. Every consumer
+ * dedupes by URL anyway, so dropping the duplicate here changes no count.
+ *
  * Plain .mjs so the rule is testable with `node --test` and no build step. A
  * view over the files: nothing here writes.
  */
@@ -25,11 +31,19 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
  * @template {{url: string}} T
  * @param {T[]} inbox rows in pipeline.md file order
  * @param {Map<string, string>} scanDates url → first_seen (readScanDates)
- * @returns {(T & {scannedAt?: string})[]} the same rows, newest scan first
+ * @returns {(T & {scannedAt?: string})[]} one row per URL, newest scan first
  */
 export function orderInboxByScan(inbox, scanDates) {
+  // index of the line kept for each URL: the first not ticked, else the first
+  const keep = new Map();
+  inbox.forEach((job, i) => {
+    const k = keep.get(job.url);
+    if (k === undefined || (inbox[k].done && !job.done)) keep.set(job.url, i);
+  });
   return inbox
-    .map((job, i) => {
+    .map((job, i) => ({ job, i }))
+    .filter(({ job, i }) => keep.get(job.url) === i)
+    .map(({ job, i }) => {
       const d = scanDates.get(job.url);
       return { job: { ...job, scannedAt: d && ISO_DATE.test(d) ? d : undefined }, i };
     })
@@ -54,4 +68,24 @@ export function compareScannedAt(a, b) {
 export function countNotHidden(pending, hidden) {
   const h = new Set(hidden);
   return pending.filter((j) => !h.has(j.url)).length;
+}
+
+/** The stored hidden list, read back from localStorage. Anything that is not
+ *  an array of strings (a hand edit, another app's value) reads as empty, so a
+ *  bad value cannot throw while the Pipeline page renders. */
+export function parseHiddenList(raw) {
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((u) => typeof u === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The number on the "N hidden · restore" control: the hidden rows still in
+ *  the inbox, or, when none are, every stored entry. The control shows while
+ *  the stored list is not empty, so an X on a row since ticked can still be
+ *  cleared, and a later re-list of that URL does not arrive already hidden. */
+export function restoreCount(pending, hidden) {
+  return pending.length - countNotHidden(pending, hidden) || hidden.length;
 }

@@ -14,7 +14,7 @@ import path from "node:path";
 import { parseInboxLine } from "../../src/lib/inbox-line.mjs";
 import { parseApplications } from "../../src/lib/tracker-table.mjs";
 import { markTrackedInbox } from "../../src/lib/inbox-tracked.mjs";
-import { orderInboxByScan, compareScannedAt, countNotHidden } from "../../src/lib/inbox-order.mjs";
+import { orderInboxByScan, compareScannedAt, countNotHidden, parseHiddenList, restoreCount } from "../../src/lib/inbox-order.mjs";
 
 // Lines from data/pipeline.md on 15 September 2026, in file order; the long fit
 // reasons are cut short. Darktrace came from the 14 September run, Wolters Kluwer
@@ -111,6 +111,50 @@ test("X: the count leaves out a hidden row, and ignores an X on a row no longer 
   const klarna = pending.find((j) => j.company === "Klarna").url;
   assert.equal(countNotHidden(pending, [klarna]), 9);
   assert.equal(countNotHidden(pending, [klarna, "https://gone.example/ticked-since"]), 9);
+});
+
+test("one URL listed twice: the earlier labelled line is the row kept, not a later bare re-add", () => {
+  const bare = "- [ ] https://jobs.deel.com/klarna/job-details/7d04c8ad-fa8f-4248-b55a-bd5ff5d6aa4a/overview | Klarna | Business Development Associate — Media Sales & Partnerships";
+  const out = orderInboxByScan(inbox([...PIPELINE, bare]), SCAN_DATES);
+  const rows = out.filter((j) => j.company === "Klarna");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].fit, "PASS");
+  assert.equal(rows[0].postedAt, "2026-08-29");
+  assert.equal(rows[0].location, "London, UK");
+  assert.equal(out.length, PIPELINE.length);
+  // its place is still the labelled line's place in the 17:00 run
+  assert.deepEqual(out.slice(0, 6).map((j) => j.company), EVENING);
+});
+
+test("one URL listed twice: an earlier ticked line gives way to a later unticked one", () => {
+  const lines = [
+    "- [x] https://a.example/1 | A | Role | London | fit: SKIP",
+    "- [ ] https://a.example/1 | A | Role | London | fit: PASS",
+  ];
+  const out = orderInboxByScan(inbox(lines, new Map()), new Map());
+  assert.equal(out.length, 1);
+  assert.equal(out[0].done, false);
+  assert.equal(out[0].fit, "PASS");
+});
+
+test("X: restore stays available when every X-ed row has since been ticked", () => {
+  const pending = orderInboxByScan(inbox(), SCAN_DATES);
+  const gone = ["https://gone.example/ticked-1", "https://gone.example/ticked-2"];
+  assert.equal(countNotHidden(pending, gone), pending.length); // nothing in the inbox is hidden
+  assert.equal(restoreCount(pending, gone), 2); // yet the control shows, with the stored entries
+  const klarna = pending.find((j) => j.company === "Klarna").url;
+  assert.equal(restoreCount(pending, [klarna, ...gone]), 1); // a hidden row still here is the number
+  assert.equal(restoreCount(pending, []), 0);
+});
+
+test("X: a stored hidden list that is not an array of strings reads as empty", () => {
+  assert.deepEqual(parseHiddenList('["https://a.example/1","https://b.example/2"]'), ["https://a.example/1", "https://b.example/2"]);
+  assert.deepEqual(parseHiddenList('{"url":"https://a.example/1"}'), []);
+  assert.deepEqual(parseHiddenList('"https://a.example/1"'), []);
+  assert.deepEqual(parseHiddenList("null"), []);
+  assert.deepEqual(parseHiddenList("not json"), []);
+  assert.deepEqual(parseHiddenList('["https://a.example/1", 7, null, {"u":1}]'), ["https://a.example/1"]);
+  assert.equal(countNotHidden([{ url: "https://a.example/1" }], parseHiddenList('{"x":1}')), 1);
 });
 
 // The evaluation over the live files. Read only; skipped when the data is absent.

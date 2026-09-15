@@ -11,7 +11,7 @@ import { canonStatus, scoreNum, scoreTone, statusDot } from "@/lib/format";
 import { InboxTriage } from "@/components/inbox/inbox-triage";
 import { cn } from "@/lib/cn";
 import { companyPresentation, companySearchText } from "@/lib/company-presentation.mjs";
-import { countNotHidden } from "@/lib/inbox-order.mjs";
+import { countNotHidden, parseHiddenList } from "@/lib/inbox-order.mjs";
 
 // INBOX (the triage queue) is the default tab; the rest filter the tracker.
 const TABS = [
@@ -103,7 +103,7 @@ export function PipelineView({
   useEffect(() => {
     try {
       const h = localStorage.getItem(HIDDEN_KEY);
-      if (h) setHidden(JSON.parse(h));
+      if (h) setHidden(parseHiddenList(h)); // a non-array value would throw in render and blank the page
     } catch {
       /* ignore */
     }

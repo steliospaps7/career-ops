@@ -7,7 +7,7 @@ import type { InboxJob } from "@/lib/career-ops";
 import type { AtsSource } from "@/lib/explore";
 import { ATS_SOURCES } from "@/lib/explore";
 import { daysSince, seniorityFromTitle, sourceFromUrl, SENIORITY_ORDER, type Seniority } from "@/lib/inbox";
-import { compareScannedAt, countNotHidden } from "@/lib/inbox-order.mjs";
+import { compareScannedAt, countNotHidden, restoreCount } from "@/lib/inbox-order.mjs";
 import { FacetChips } from "./facet-chips";
 import { TriageRow, type RowScore } from "./triage-row";
 import { ShortlistTray, type ShortItem } from "./shortlist-tray";
@@ -129,7 +129,8 @@ export function InboxTriage({
 
   // 🔴 SINGLE ORDER PLUG POINT — newest scan first (scannedAt, the day the scan first
   // saw the row; unknown last). Not the advert's posted date. Rows of one day keep the
-  // server's order, later pipeline.md line first (the sort is stable).
+  // order they arrive in (the sort is stable); the later-line-first tie-break is set
+  // server-side by orderInboxByScan in lib/inbox-order.mjs, not here.
   // A smarter ranker replaces ONLY this comparator; facets/triage/shortlist/score never
   // touch relevance. This is the whole firewall in one line.
   const ordered = useMemo(() => [...filtered].sort((a, b) => compareScannedAt(a.job, b.job)), [filtered]);
@@ -212,9 +213,10 @@ export function InboxTriage({
         <p className="text-sm font-medium text-foreground">
           {capped ? "Fresh — worth a look" : anyFacet ? `${filtered.length} match${filtered.length === 1 ? "" : "es"}` : "All roles"}
         </p>
-        {hiddenCount > 0 && (
+        {/* shown while anything is stored, even X-ed rows since ticked, so the list can always be cleared */}
+        {hidden.length > 0 && (
           <button type="button" onClick={() => setHidden([])} className="text-xs text-faint transition-colors hover:text-foreground">
-            {hiddenCount} hidden · restore
+            {restoreCount(enriched.map((e) => e.job), hidden)} hidden · restore
           </button>
         )}
       </div>
