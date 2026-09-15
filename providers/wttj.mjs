@@ -75,6 +75,35 @@ export function parseEnvPayload(text) {
 }
 
 /**
+ * The place a WTTJ job slug names: "chief-of-staff_new-york_fqilsriq" →
+ * "new-york". WTTJ builds the slug from the office city when the job is
+ * published. A segment with a digit is an id, and a two-letter one ("gb") is a
+ * country code; neither is a place.
+ * @param {string} slug
+ * @returns {string}
+ */
+export function slugPlace(slug) {
+  const segment = String(slug).split('_')[1] || '';
+  return segment.length >= 3 && !/\d/.test(segment) ? segment.toLowerCase() : '';
+}
+
+/** "Zürich" → "zurich", "New York" → "new-york": the slug's own spelling. */
+function placeKey(text) {
+  return String(text).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+/**
+ * Whether an office city and a slug place are the same place. Whole words
+ * only, and only extra words at the end: "newcastle" is "Newcastle upon Tyne",
+ * but "new-york" is not "York" and "yorkshire" is not "York".
+ */
+function samePlace(city, place) {
+  const key = placeKey(city);
+  return key === place || key.startsWith(`${place}-`) || place.startsWith(`${key}-`);
+}
+
+/**
  * Normalize a single Algolia hit. Exported for tests.
  *
  * Field mapping → normalized Job shape:
@@ -82,7 +111,8 @@ export function parseEnvPayload(text) {
  *   - url:      /en/companies/{organization.slug}/jobs/{slug} on the WTTJ site
  *   - company:  `organization.name`
  *   - location: offices[0] city+country, with ", Remote" appended when the
- *               posting allows fulltime remote
+ *               posting allows fulltime remote. The country is left out when
+ *               the slug names a different place (see slugPlace)
  *   - postedAt: `published_at_timestamp` (epoch seconds → ms)
  *   - salary:   {min, max, currency} from salary_yearly_minimum/salary_maximum
  *
@@ -105,9 +135,19 @@ export function normalizeWttjHit(h) {
       : 'Welcome to the Jungle';
 
   const office = Array.isArray(h.offices) && h.offices.length > 0 ? h.offices[0] : null;
+  const city = office && typeof office.city === 'string' ? office.city.trim() : '';
+  const place = slugPlace(slug);
   const parts = [];
-  if (office && typeof office.city === 'string' && office.city.trim()) parts.push(office.city.trim());
-  if (office && typeof office.country === 'string' && office.country.trim()) parts.push(office.country.trim());
+  if (city) parts.push(city);
+  // When the office record and the job's own slug name different places, the
+  // record's country cannot be trusted, so it is left out. On 15 September
+  // 2026 WTTJ's index filed New York, Houston, San Francisco and Scottsdale
+  // jobs under city "York", country "United Kingdom" (slugs "_new-york_",
+  // "_houston_"), and the UK country word let them through a UK location
+  // filter. The slug place is not added: "London" in a slug would then let a
+  // Berlin office past a filter that allows London.
+  const trustCountry = !city || !place || samePlace(city, place);
+  if (trustCountry && office && typeof office.country === 'string' && office.country.trim()) parts.push(office.country.trim());
   if (h.remote === 'fulltime') parts.push('Remote');
   const location = parts.join(', ');
 
