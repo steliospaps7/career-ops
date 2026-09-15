@@ -1,5 +1,6 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
+import { asciiFold } from '../lib/ascii-fold.mjs';
 
 // Welcome to the Jungle provider — queries WTTJ's public Algolia search index
 // (the same one the welcometothejungle.com jobs UI calls). The Algolia app id
@@ -75,6 +76,44 @@ export function parseEnvPayload(text) {
 }
 
 /**
+ * The place a WTTJ job slug names: "chief-of-staff_new-york_fqilsriq" →
+ * "new-york". WTTJ builds the slug as title, office city at publication, and
+ * an optional id, joined by "_".
+ *
+ * Shapes seen in 2,437 live slugs on 15 September 2026: "title_place" (728),
+ * "title_place_id" (1,299), "title_place_CODE_id" (364, e.g. "_HERMS_q3xlOeV"),
+ * "title_CODE_id" with no place, and one title with "_" inside it. Trailing
+ * segments with a digit or a capital are id parts. A third segment of eight
+ * lower-case letters is an id too (242 of the 1,299 ids carry no digit). A
+ * second segment of eight letters is a place: 49 two-part slugs end in one
+ * ("bordeaux", "toulouse") and none in a letter-only id, so the two cannot be
+ * told apart and the place reading wins. The place must be letters and inner
+ * hyphens, at least three long, so "gb" and "paris-16e" are not places.
+ * @param {string} slug
+ * @returns {string}
+ */
+export function slugPlace(slug) {
+  const segments = String(slug).split('_');
+  const before = segments.length;
+  while (segments.length > 1 && /[A-Z0-9]/.test(segments[segments.length - 1])) segments.pop();
+  if (segments.length === before && segments.length >= 3 && /^[a-z]{8}$/.test(segments[segments.length - 1])) segments.pop();
+  if (segments.length < 2) return '';
+  const place = segments[segments.length - 1];
+  return place.length >= 3 && /^[a-z]+(?:-[a-z]+)*$/.test(place) ? place : '';
+}
+
+/**
+ * Whether an office city and a slug place are the same place. Whole words
+ * only, and the office may carry extra words at the end: "newcastle" is
+ * "Newcastle upon Tyne", but "new-york" is not "York" or "New", "yorkshire" is
+ * not "York", and "cambridge-ma" is not "Cambridge".
+ */
+function samePlace(city, place) {
+  const key = asciiFold(city).replace(/ /g, '-');
+  return key === place || key.startsWith(`${place}-`);
+}
+
+/**
  * Normalize a single Algolia hit. Exported for tests.
  *
  * Field mapping → normalized Job shape:
@@ -82,7 +121,9 @@ export function parseEnvPayload(text) {
  *   - url:      /en/companies/{organization.slug}/jobs/{slug} on the WTTJ site
  *   - company:  `organization.name`
  *   - location: offices[0] city+country, with ", Remote" appended when the
- *               posting allows fulltime remote
+ *               posting allows fulltime remote. When the slug names another
+ *               place, offices[0]'s country is left out and an office that
+ *               names the slug's place leads (see slugPlace)
  *   - postedAt: `published_at_timestamp` (epoch seconds → ms)
  *   - salary:   {min, max, currency} from salary_yearly_minimum/salary_maximum
  *
@@ -104,10 +145,32 @@ export function normalizeWttjHit(h) {
       ? h.organization.name.trim()
       : 'Welcome to the Jungle';
 
-  const office = Array.isArray(h.offices) && h.offices.length > 0 ? h.offices[0] : null;
+  const offices = Array.isArray(h.offices) ? h.offices.filter(o => o && typeof o === 'object') : [];
+  const cityOf = (o) => (o && typeof o.city === 'string' ? o.city.trim() : '');
+  const countryOf = (o) => (o && typeof o.country === 'string' ? o.country.trim() : '');
+  const first = offices[0] || null;
+  const place = slugPlace(slug);
   const parts = [];
-  if (office && typeof office.city === 'string' && office.city.trim()) parts.push(office.city.trim());
-  if (office && typeof office.country === 'string' && office.country.trim()) parts.push(office.country.trim());
+  if (!place || !cityOf(first) || samePlace(cityOf(first), place)) {
+    if (cityOf(first)) parts.push(cityOf(first));
+    if (countryOf(first)) parts.push(countryOf(first));
+  } else {
+    // The first office does not name the place in the job's own slug, so its
+    // country cannot be trusted and is left out. On 15 September 2026 WTTJ's
+    // index filed New York, Houston, San Francisco and Scottsdale jobs under
+    // city "York", country "United Kingdom" (slugs "_new-york_", "_houston_"),
+    // and the UK country word let them through a UK location filter. Some list
+    // the real office second (offices [York, San Francisco]); when one does, it
+    // leads with its country, and the first office's city follows, so a job
+    // with offices [London, Ghent] still names London. The slug place is never
+    // added on its own: "London" in a slug would then let a Berlin office past
+    // a filter that allows London. Without the country, a filter with an allow
+    // list drops the row, but a block-only filter passes it, and
+    // judgeAttendance in scan.mjs no longer sees a UK town.
+    const match = offices.find(o => cityOf(o) && samePlace(cityOf(o), place));
+    const lead = match ? [cityOf(match), countryOf(match)].filter(Boolean).join(', ') : '';
+    parts.push([lead, cityOf(first)].filter(Boolean).join(' · '));
+  }
   if (h.remote === 'fulltime') parts.push('Remote');
   const location = parts.join(', ');
 
