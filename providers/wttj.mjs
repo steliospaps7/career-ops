@@ -121,8 +121,9 @@ function samePlace(city, place) {
  *   - url:      /en/companies/{organization.slug}/jobs/{slug} on the WTTJ site
  *   - company:  `organization.name`
  *   - location: offices[0] city+country, with ", Remote" appended when the
- *               posting allows fulltime remote. The country is left out when
- *               no office names the slug's place (see slugPlace)
+ *               posting allows fulltime remote. When the slug names another
+ *               place, offices[0]'s country is left out and an office that
+ *               names the slug's place leads (see slugPlace)
  *   - postedAt: `published_at_timestamp` (epoch seconds → ms)
  *   - salary:   {min, max, currency} from salary_yearly_minimum/salary_maximum
  *
@@ -144,24 +145,32 @@ export function normalizeWttjHit(h) {
       ? h.organization.name.trim()
       : 'Welcome to the Jungle';
 
-  const offices = Array.isArray(h.offices) ? h.offices : [];
-  const office = offices.length > 0 ? offices[0] : null;
-  const city = office && typeof office.city === 'string' ? office.city.trim() : '';
+  const offices = Array.isArray(h.offices) ? h.offices.filter(o => o && typeof o === 'object') : [];
+  const cityOf = (o) => (o && typeof o.city === 'string' ? o.city.trim() : '');
+  const countryOf = (o) => (o && typeof o.country === 'string' ? o.country.trim() : '');
+  const first = offices[0] || null;
   const place = slugPlace(slug);
   const parts = [];
-  if (city) parts.push(city);
-  // When no office names the place in the job's own slug, the office record's
-  // country cannot be trusted, so it is left out. On 15 September 2026 WTTJ's
-  // index filed New York, Houston, San Francisco and Scottsdale jobs under city
-  // "York", country "United Kingdom" (slugs "_new-york_", "_houston_"), and the
-  // UK country word let them through a UK location filter. The slug place is
-  // not added: "London" in a slug would then let a Berlin office past a filter
-  // that allows London. Without the country, a filter with an allow list drops
-  // the row, but a block-only filter passes it and judgeAttendance in scan.mjs
-  // no longer sees a UK town.
-  const trustCountry = !city || !place ||
-    offices.some(o => o && typeof o.city === 'string' && samePlace(o.city, place));
-  if (trustCountry && office && typeof office.country === 'string' && office.country.trim()) parts.push(office.country.trim());
+  if (!place || !cityOf(first) || samePlace(cityOf(first), place)) {
+    if (cityOf(first)) parts.push(cityOf(first));
+    if (countryOf(first)) parts.push(countryOf(first));
+  } else {
+    // The first office does not name the place in the job's own slug, so its
+    // country cannot be trusted and is left out. On 15 September 2026 WTTJ's
+    // index filed New York, Houston, San Francisco and Scottsdale jobs under
+    // city "York", country "United Kingdom" (slugs "_new-york_", "_houston_"),
+    // and the UK country word let them through a UK location filter. Some list
+    // the real office second (offices [York, San Francisco]); when one does, it
+    // leads with its country, and the first office's city follows, so a job
+    // with offices [London, Ghent] still names London. The slug place is never
+    // added on its own: "London" in a slug would then let a Berlin office past
+    // a filter that allows London. Without the country, a filter with an allow
+    // list drops the row, but a block-only filter passes it, and
+    // judgeAttendance in scan.mjs no longer sees a UK town.
+    const match = offices.find(o => cityOf(o) && samePlace(cityOf(o), place));
+    const lead = match ? [cityOf(match), countryOf(match)].filter(Boolean).join(', ') : '';
+    parts.push([lead, cityOf(first)].filter(Boolean).join(' · '));
+  }
   if (h.remote === 'fulltime') parts.push('Remote');
   const location = parts.join(', ');
 

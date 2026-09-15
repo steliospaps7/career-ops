@@ -372,10 +372,20 @@ eq('"New" office with a "new-york" slug: dropped by the filter',
 eq('Cambridge office with a "cambridge-ma" slug: country dropped',
   normalizeWttjHit(hit('acme', 'role_cambridge-ma_ab12cd34', { city: 'Cambridge', country: 'United Kingdom' })).location, 'Cambridge');
 
-// Any office may name the slug's place; the first office is still what is shown.
-eq('Offices [Slough, London] with a london slug: country kept',
-  normalizeWttjHit({ ...hit('acme', 'role_london_ab12cd34', { city: 'Slough', country: 'United Kingdom' }), offices: [{ city: 'Slough', country: 'United Kingdom' }, { city: 'London', country: 'United Kingdom' }] }).location,
-  'Slough, United Kingdom');
+// Any office may name the slug's place; it then leads, and the first office's
+// city follows without its country. Live on 15 September: offices [York,
+// San Francisco] with a san-francisco slug, and [London, Ghent] with a ghent slug.
+const multi = (slug, list) => normalizeWttjHit({ ...hit('acme', slug, list[0]), offices: list });
+eq('Offices [Slough, London] with a london slug: London leads',
+  multi('role_london_ab12cd34', [{ city: 'Slough', country: 'United Kingdom' }, { city: 'London', country: 'United Kingdom' }]).location, 'London, United Kingdom · Slough');
+const sf = multi('frontier-agents-engineer-applied-ai_san-francisco_iivvtosw', [BARE_YORK, { city: 'San Francisco', country: 'United States', country_code: 'US' }]);
+eq('Offices [York GB, San Francisco] with a san-francisco slug: San Francisco leads', sf.location, 'San Francisco, United States · York');
+eq('Offices [York GB, San Francisco] with a san-francisco slug: blocked', passesFilter(sf.location, sf.url, 'Role'), false);
+const ghentMulti = multi('chief-of-staff_ghent_wsujg4xk', [{ city: 'London', country: 'United Kingdom' }, { city: 'Ghent', country: 'Belgium' }]);
+eq('Offices [London, Ghent] with a ghent slug: Ghent leads, London follows', ghentMulti.location, 'Ghent, Belgium · London');
+eq('Offices [London, Ghent] with a ghent slug: still passes on London', passesFilter(ghentMulti.location, ghentMulti.url, 'Role'), true);
+eq('Offices [Slough, Reading] with a london slug: first office, no country',
+  multi('role_london_ab12cd34', [{ city: 'Slough', country: 'United Kingdom' }, { city: 'Reading', country: 'United Kingdom' }]).location, 'Slough');
 
 // Letters outside a-z fold to their ASCII base, as the slug spells them.
 eq('Accents: Zürich office with a zurich slug is the same place',
