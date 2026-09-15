@@ -8,6 +8,7 @@ import { parseApplications } from "@/lib/tracker-table.mjs";
 import { isReservedReportFile } from "@/lib/report-files.mjs";
 import { parseInboxLine } from "@/lib/inbox-line.mjs";
 import { markTrackedInbox } from "@/lib/inbox-tracked.mjs";
+import { orderInboxByScan } from "@/lib/inbox-order.mjs";
 import { resolvePdfIndexPath } from "@/lib/core/pdf-index";
 // Pure parser, no I/O — shared with the apply flow's CV resolver so the two
 // don't drift into two different definitions of "which report does this
@@ -58,7 +59,7 @@ function read(rel: string): string | null {
   }
 }
 
-export type InboxJob = { url: string; company: string; role: string; location?: string; compensation?: string; done: boolean; postedAt?: string; fit?: string; route?: string };
+export type InboxJob = { url: string; company: string; role: string; location?: string; compensation?: string; done: boolean; postedAt?: string; scannedAt?: string; fit?: string; route?: string };
 
 /** Parse data/pipeline.md into inbox jobs. The per-line rule, labeled segments
  *  included, lives in lib/inbox-line.mjs so it can be tested without a build. */
@@ -258,10 +259,14 @@ export function pipelineSummary(): PipelineSummary {
     root,
     rootExists: fs.existsSync(root),
     // join the freshness date (first_seen) onto each raw posting — the inbox's
-    // triage view orders/faceted-filters on it entirely client-side. A row the
+    // triage view faceted-filters on it entirely client-side. The rows come
+    // newest scan first, on scannedAt (see inbox-order.mjs). A row the
     // tracker already holds is done, ticked or not (see inbox-tracked.mjs).
     inbox: markTrackedInbox(
-      readInbox().map((j) => ({ ...j, postedAt: j.postedAt ?? scanDates.get(j.url) })),
+      orderInboxByScan(
+        readInbox().map((j) => ({ ...j, postedAt: j.postedAt ?? scanDates.get(j.url) })),
+        scanDates,
+      ),
       applications,
     ),
     applications,

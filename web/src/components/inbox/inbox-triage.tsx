@@ -1,19 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { Undo2 } from "lucide-react";
 import { useJobs } from "@/components/jobs/job-store";
 import type { InboxJob } from "@/lib/career-ops";
 import type { AtsSource } from "@/lib/explore";
 import { ATS_SOURCES } from "@/lib/explore";
 import { daysSince, seniorityFromTitle, sourceFromUrl, SENIORITY_ORDER, type Seniority } from "@/lib/inbox";
+import { compareScannedAt, countNotHidden, restoreCount } from "@/lib/inbox-order.mjs";
 import { FacetChips } from "./facet-chips";
 import { TriageRow, type RowScore } from "./triage-row";
 import { ShortlistTray, type ShortItem } from "./shortlist-tray";
 import { cn } from "@/lib/cn";
 
 const SHORTLIST_KEY = "career-ops:shortlist";
-const HIDDEN_KEY = "career-ops:hidden";
 const CONFIG_KEY = "career-ops:config";
 const BATCH = 20;
 
@@ -21,7 +21,17 @@ const BATCH = 20;
 // Default is a small fresh batch (never the full wall); free facets + Save/Skip narrow
 // it; only "Score shortlist" spends tokens. 🔴 The shell is agnostic to what makes a
 // role relevant — order is freshness with a single documented plug point.
-export function InboxTriage({ inbox }: { inbox: InboxJob[] }) {
+// The rows hidden with X are held by PipelineView, so its "N in inbox" count and
+// this list agree; the list lives in this browser only (see pipeline-view.tsx).
+export function InboxTriage({
+  inbox,
+  hidden,
+  setHidden,
+}: {
+  inbox: InboxJob[];
+  hidden: string[];
+  setHidden: Dispatch<SetStateAction<string[]>>;
+}) {
   const { jobs, startJob } = useJobs();
 
   // facets
@@ -34,7 +44,6 @@ export function InboxTriage({ inbox }: { inbox: InboxJob[] }) {
 
   // persisted triage state + ephemeral selection/undo
   const [shortlist, setShortlist] = useState<ShortItem[]>([]);
-  const [hidden, setHidden] = useState<string[]>([]);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [undo, setUndo] = useState<{ label: string; fn: () => void } | null>(null);
   const [hasCli, setHasCli] = useState(false);
@@ -44,8 +53,6 @@ export function InboxTriage({ inbox }: { inbox: InboxJob[] }) {
     try {
       const s = localStorage.getItem(SHORTLIST_KEY);
       if (s) setShortlist(JSON.parse(s));
-      const h = localStorage.getItem(HIDDEN_KEY);
-      if (h) setHidden(JSON.parse(h));
       const c = localStorage.getItem(CONFIG_KEY);
       setHasCli(!!(c && JSON.parse(c).cliId));
     } catch {
@@ -56,9 +63,6 @@ export function InboxTriage({ inbox }: { inbox: InboxJob[] }) {
   useEffect(() => {
     if (loaded) try { localStorage.setItem(SHORTLIST_KEY, JSON.stringify(shortlist)); } catch { /* quota */ }
   }, [shortlist, loaded]);
-  useEffect(() => {
-    if (loaded) try { localStorage.setItem(HIDDEN_KEY, JSON.stringify(hidden)); } catch { /* quota */ }
-  }, [hidden, loaded]);
   // auto-dismiss the undo toast
   useEffect(() => {
     if (!undo) return;
@@ -123,15 +127,19 @@ export function InboxTriage({ inbox }: { inbox: InboxJob[] }) {
     [enriched, hidden, within, sources, seniorities, locQ, kw],
   );
 
-  // 🔴 SINGLE ORDER PLUG POINT — freshness only (newest first_seen first; unknown last).
+  // 🔴 SINGLE ORDER PLUG POINT — newest scan first (scannedAt, the day the scan first
+  // saw the row; unknown last). Not the advert's posted date. Rows of one day keep the
+  // order they arrive in (the sort is stable); the later-line-first tie-break is set
+  // server-side by orderInboxByScan in lib/inbox-order.mjs, not here.
   // A smarter ranker replaces ONLY this comparator; facets/triage/shortlist/score never
   // touch relevance. This is the whole firewall in one line.
-  const ordered = useMemo(() => [...filtered].sort((a, b) => (a.age ?? Infinity) - (b.age ?? Infinity)), [filtered]);
+  const ordered = useMemo(() => [...filtered].sort((a, b) => compareScannedAt(a.job, b.job)), [filtered]);
 
   const anyFacet = within != null || sources.size > 0 || seniorities.size > 0 || locQ.trim() !== "" || kw.trim() !== "";
   const capped = !showAll && !anyFacet;
   const visible = capped ? ordered.slice(0, BATCH) : ordered;
-  const hiddenCount = hidden.length;
+  // only hidden rows still in this inbox; an X on a row since ticked is not counted
+  const hiddenCount = enriched.length - countNotHidden(enriched.map((e) => e.job), hidden);
 
   const isShortlisted = (url: string) => shortlist.some((s) => s.url === url);
 
@@ -205,9 +213,10 @@ export function InboxTriage({ inbox }: { inbox: InboxJob[] }) {
         <p className="text-sm font-medium text-foreground">
           {capped ? "Fresh — worth a look" : anyFacet ? `${filtered.length} match${filtered.length === 1 ? "" : "es"}` : "All roles"}
         </p>
-        {hiddenCount > 0 && (
+        {/* shown while anything is stored, even X-ed rows since ticked, so the list can always be cleared */}
+        {hidden.length > 0 && (
           <button type="button" onClick={() => setHidden([])} className="text-xs text-faint transition-colors hover:text-foreground">
-            {hiddenCount} hidden · restore
+            {restoreCount(enriched.map((e) => e.job), hidden)} hidden · restore
           </button>
         )}
       </div>
