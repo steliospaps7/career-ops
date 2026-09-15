@@ -55,6 +55,24 @@ test("company and role match whatever the case, spacing and punctuation", () => 
   assert.equal(out.done, true);
 });
 
+test("a location tag keeps the line pending: looser than the scanner, by choice", () => {
+  // The scanner strips "(Berlin)" and calls this a duplicate; this key does not
+  // strip tags, so the row stays in the inbox until the recheck ticks it.
+  const tracker = "| # | Date | Company | Via | Role | Score | Status | PDF | Report | Notes |\n|---|---|---|---|---|---|---|---|---|---|\n| 300 | 2026-09-15 | Acme | — | Product Manager | 3.5/5 | Evaluated | ❌ | - | x |\n";
+  const job = parseInboxLine("- [ ] https://x.example/3 | Acme | Product Manager (Berlin) | Berlin");
+  assert.equal(markTrackedInbox([job], parseApplications(tracker, ROOT)).at(0).done, false);
+});
+
+test("a tracker row with company ? hides nothing (row 93's shape)", () => {
+  const tracker = "| # | Date | Company | Via | Role | Score | Status | PDF | Report | Notes |\n|---|---|---|---|---|---|---|---|---|---|\n| 93 | 2026-09-10 | ? | Jack and Jill | Founder's Associate | 3.0/5 | SKIP | ❌ | - | MARGINAL |\n";
+  const apps = parseApplications(tracker, ROOT);
+  assert.equal(apps.length, 1, "the row is parsed, so the guard is what stops it");
+  for (const company of ["?", "✸", "—"]) {
+    const job = parseInboxLine(`- [ ] https://x.example/4 | ${company} | Founder's Associate | London`);
+    assert.equal(markTrackedInbox([job], apps).at(0).done, false, `company ${company}`);
+  }
+});
+
 test("a ticked line stays done and an empty tracker hides nothing", () => {
   const ticked = parseInboxLine("- [x] https://x.example/2 | Acme | Analyst");
   assert.equal(markTrackedInbox([ticked], []).at(0).done, true);
