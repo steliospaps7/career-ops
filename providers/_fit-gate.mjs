@@ -17,6 +17,12 @@
  * one line of JSON, an excerpt the advert does not contain, and a row past
  * either ceiling.
  *
+ * A call that fails is asked once more before the row is left REVIEW: a
+ * timeout, an answer that is not the one line of JSON, and an excerpt the
+ * advert does not contain. The retry spends what is left of the same run
+ * budget, so it can never push a run past it, and a row that fails twice
+ * still reaches a person.
+ *
  * Under `providers/` with an underscore prefix, like `_fit-prompt.mjs`, so the
  * provider registry never discovers it as a board.
  */
@@ -231,50 +237,77 @@ export function createFitGate({ settings, rules, rulesError = '', judge, canonic
     }
     reserved++;
     await acquire();
-    let controller = null;
-    let timer = null;
     try {
       if (firstCallAt == null) firstCallAt = now();
-      const remaining = settings.budgetMs - (now() - firstCallAt);
-      if (remaining <= 0) {
+
+      /**
+       * One call: the judge, the parse and the excerpt check.
+       *
+       * `null` when the time budget has nothing left for a call. Otherwise
+       * `{outcome, retry}`, where `retry` marks the three failure kinds worth
+       * asking a second time: the call itself failed or timed out, the answer
+       * was not the one line of JSON, or the excerpt was not in the advert. A
+       * verdict the model actually reached is never retried.
+       */
+      const attempt = async () => {
+        const remaining = settings.budgetMs - (now() - firstCallAt);
+        if (remaining <= 0) return null;
+        tally.calls++;
+        const timeoutMs = Math.min(settings.callTimeoutMs, remaining);
+        const controller = new AbortController();
+        let timer = null;
+        try {
+          let answer;
+          try {
+            answer = await Promise.race([
+              judge(buildFitPrompt({ ...rules, advert, company: row.company, title: row.title, location: row.location }), { signal: controller.signal }),
+              new Promise((_, reject) => {
+                timer = setTimeout(() => {
+                  // Reject before aborting: the real judge rejects synchronously on
+                  // abort, and the race must settle on the timeout's reason.
+                  reject(Object.assign(new Error(`timed out after ${Math.round(timeoutMs / 1000)} s`), { timedOut: true }));
+                  controller.abort();
+                }, timeoutMs);
+              }),
+            ]);
+          } catch (err) {
+            return { outcome: review(`fit call failed: ${oneLine(err?.message) || 'unknown error'}`, { failed: true }), retry: true };
+          }
+          for (const model of answer?.models || []) tally.models.set(model, (tally.models.get(model) || 0) + 1);
+          const parsed = parseFitAnswer(answer?.text, advert);
+          if (!parsed.ok) {
+            return { outcome: review(`fit answer invalid: ${parsed.error}`, { failed: true }), retry: true };
+          }
+          if (!parsed.excerptFound) {
+            return { outcome: review(`excerpt not found in the advert; the model said ${parsed.verdict}: ${oneLine(parsed.reason)}`, { excerpt: oneLine(parsed.excerpt) }), retry: true };
+          }
+          const outcome = { verdict: parsed.verdict, reason: oneLine(parsed.reason), excerpt: oneLine(parsed.excerpt), failed: false, ceiling: false, allowed: false, held: false };
+          if (outcome.verdict === 'SKIP') {
+            outcome.allowed = allow.has(canonicalize(row.company));
+            outcome.held = outcome.allowed || !settings.skip;
+          }
+          return { outcome, retry: false };
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      };
+
+      let result = await attempt();
+      if (result === null) {
         reserved--;
         return record(row, budgetSpent());
       }
-      tally.calls++;
-      const timeoutMs = Math.min(settings.callTimeoutMs, remaining);
-      controller = new AbortController();
-      let answer;
-      try {
-        answer = await Promise.race([
-          judge(buildFitPrompt({ ...rules, advert, company: row.company, title: row.title, location: row.location }), { signal: controller.signal }),
-          new Promise((_, reject) => {
-            timer = setTimeout(() => {
-              // Reject before aborting: the real judge rejects synchronously on
-              // abort, and the race must settle on the timeout's reason.
-              reject(Object.assign(new Error(`timed out after ${Math.round(timeoutMs / 1000)} s`), { timedOut: true }));
-              controller.abort();
-            }, timeoutMs);
-          }),
-        ]);
-      } catch (err) {
-        return record(row, review(`fit call failed: ${oneLine(err?.message) || 'unknown error'}`, { failed: true }));
+      if (result.retry) {
+        // One retry per failed call, and no more: a bad envelope or a timeout is
+        // usually a one-off, and a row that fails twice is a row a person should
+        // see. The retry takes what is left of the run's budget, so a second try
+        // can never push the run past it; with nothing left, the first failure's
+        // REVIEW stands.
+        const second = await attempt();
+        if (second !== null) result = second;
       }
-      for (const model of answer?.models || []) tally.models.set(model, (tally.models.get(model) || 0) + 1);
-      const parsed = parseFitAnswer(answer?.text, advert);
-      if (!parsed.ok) {
-        return record(row, review(`fit answer invalid: ${parsed.error}`, { failed: true }));
-      }
-      if (!parsed.excerptFound) {
-        return record(row, review(`excerpt not found in the advert; the model said ${parsed.verdict}: ${oneLine(parsed.reason)}`, { excerpt: oneLine(parsed.excerpt) }));
-      }
-      const outcome = { verdict: parsed.verdict, reason: oneLine(parsed.reason), excerpt: oneLine(parsed.excerpt), failed: false, ceiling: false, allowed: false, held: false };
-      if (outcome.verdict === 'SKIP') {
-        outcome.allowed = allow.has(canonicalize(row.company));
-        outcome.held = outcome.allowed || !settings.skip;
-      }
-      return record(row, outcome);
+      return record(row, result.outcome);
     } finally {
-      if (timer) clearTimeout(timer);
       release();
     }
   }

@@ -4,8 +4,9 @@
  * One model call per genuinely new row, before the row reaches the queue.
  * PASS is queued with `fit: PASS`; a SKIP leaves the queue for Processed only
  * with the SKIP switch on and the company not under always_allow; everything
- * that fails is REVIEW, never PASS. A second scan over the same board assesses
- * nothing again, and with the gate off the scan is what it was.
+ * that fails is REVIEW, never PASS. A failed call is asked once more first, so
+ * only a row that fails twice reaches a person. A second scan over the same
+ * board assesses nothing again, and with the gate off the scan is what it was.
  *
  * No test here runs `claude`. The in-process cases inject the judge function;
  * the end-to-end cases run the real scan.mjs with `fit_gate.command` pointed at
@@ -164,6 +165,58 @@ async function suite() {
     const noRules = createFitGate({ settings: SETTINGS, rules: null, rulesError: 'ENOENT: criteria', judge: async () => answer('PASS') });
     const ruleless = await noRules.assess(row());
     ok('with the rules unreadable every row is REVIEW', ruleless.verdict === 'REVIEW' && /rules not loaded/.test(ruleless.reason));
+  }
+
+  // ── A failed call is asked once more, then the row is REVIEW ───────
+  {
+    // A judge that answers from a script, one reply per call. Any call past the
+    // script answers PASS, so a verdict of REVIEW proves no extra call was made.
+    const scripted = (...replies) => {
+      let made = 0;
+      return {
+        calls: () => made,
+        judge: (prompt, { signal }) => {
+          const reply = made < replies.length ? replies[made] : answer('PASS');
+          made++;
+          if (reply === 'hang') return new Promise(() => { signal.addEventListener('abort', () => {}); });
+          return Promise.resolve(reply);
+        },
+      };
+    };
+
+    const kinds = [
+      ['a call that times out', 'hang'],
+      ['an answer that is not JSON', { text: 'I think this is a PASS.' }],
+      ['an excerpt the advert does not contain', answer('SKIP', 'A sentence the advert never wrote down.')],
+    ];
+    for (const [name, failure] of kinds) {
+      const once = scripted(failure, answer('PASS'));
+      const recovered = await gateWith(once.judge, { callTimeoutMs: 30 }).assess(row());
+      ok(`${name} is asked once more, and the second answer stands`, recovered.verdict === 'PASS' && once.calls() === 2);
+
+      const twice = scripted(failure, failure);
+      const gate = gateWith(twice.judge, { callTimeoutMs: 30 });
+      const outcome = await gate.assess(row());
+      ok(`${name} twice leaves the row REVIEW, and there is no third call`, outcome.verdict === 'REVIEW' && twice.calls() === 2);
+      eq(`${name} twice counts one row assessed and two calls`, `${gate.tally.assessed} ${gate.tally.review} ${gate.tally.calls}`, '1 1 2');
+    }
+
+    const settled = scripted(answer('REVIEW'));
+    const modelReview = await gateWith(settled.judge).assess(row());
+    ok('a REVIEW the model itself reached is not asked again', modelReview.verdict === 'REVIEW' && settled.calls() === 1);
+
+    // The retry spends what is left of the run's budget, never more.
+    let clock = 0;
+    const late = scripted({ text: 'I think this is a PASS.' });
+    const budgeted = createFitGate({
+      settings: { ...SETTINGS, budgetMs: 1000 },
+      rules: RULES,
+      now: () => clock,
+      judge: (...args) => { clock += 1500; return late.judge(...args); },
+    });
+    const noRetry = await budgeted.assess(row());
+    ok('with the budget spent by the first call there is no retry and the first failure stands',
+      noRetry.verdict === 'REVIEW' && /fit answer invalid/.test(noRetry.reason) && late.calls() === 1 && budgeted.tally.calls === 1);
   }
 
   // ── The ceilings ────────────────────────────────────────────────────
@@ -389,7 +442,7 @@ process.stdin.on('data', (d) => { input += d; }).on('end', () => {
     ok('an invented excerpt is queued as review', /Invent Ltd .*\| route: review \| fit: REVIEW \(excerpt not found in the advert; the model said PASS: looks fine\)/.test(pending));
     ok('an unread advert is queued as review', /Unread Ltd .*\| route: review \| fit: REVIEW \(advert not read, nothing to judge\)/.test(pending));
     eq('no row is queued as anything but PASS or review', (pending.match(/route: standard/g) || []).length, 1);
-    eq('the unread row made no call; the other six did', calls1, 6);
+    eq('the unread row made no call; the other six did, and the two that failed were asked twice', calls1, 8);
 
     ok('the summary line counts them', out1.includes('Fit gate:              assessed 7, PASS 1, SKIP 2, REVIEW 4, failed calls 1, ceiling hits 0'));
     for (const [verdict, company] of [['SKIP', 'Skip Ltd'], ['SKIP', 'Allowed Co'], ['REVIEW', 'Review Ltd'], ['REVIEW', 'Garbled Ltd'], ['REVIEW', 'Unread Ltd'], ['REVIEW', 'Invent Ltd']]) {
