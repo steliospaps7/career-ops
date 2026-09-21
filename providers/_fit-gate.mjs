@@ -17,6 +17,14 @@
  * one line of JSON, an excerpt the advert does not contain, and a row past
  * either ceiling.
  *
+ * A call that fails is asked once more before the row is left REVIEW: a
+ * timeout, an answer that is not the one line of JSON, and an excerpt the
+ * advert does not contain. The retry spends what is left of the same run
+ * budget, so it can never push a run past it, and a row that fails twice
+ * still reaches a person. The first failure is never swallowed: it counts
+ * as `retried` on the summary line and prints a `FIT RETRY` line naming the
+ * row, the failure and what the judge said.
+ *
  * Under `providers/` with an underscore prefix, like `_fit-prompt.mjs`, so the
  * provider registry never discovers it as a board.
  */
@@ -171,7 +179,7 @@ function oneLine(text) {
  */
 export function createFitGate({ settings, rules, rulesError = '', judge, canonicalize = (n) => String(n ?? '').trim().toLowerCase(), now = Date.now }) {
   const allow = new Set((settings.alwaysAllow || []).map((c) => canonicalize(c)));
-  const tally = { assessed: 0, pass: 0, skip: 0, review: 0, failed: 0, ceilingHits: 0, calls: 0, models: new Map(), rows: [] };
+  const tally = { assessed: 0, pass: 0, skip: 0, review: 0, failed: 0, ceilingHits: 0, calls: 0, retried: 0, models: new Map(), rows: [], retries: [] };
   let firstCallAt = null;
   let reserved = 0;
   let active = 0;
@@ -231,50 +239,95 @@ export function createFitGate({ settings, rules, rulesError = '', judge, canonic
     }
     reserved++;
     await acquire();
-    let controller = null;
-    let timer = null;
     try {
       if (firstCallAt == null) firstCallAt = now();
-      const remaining = settings.budgetMs - (now() - firstCallAt);
-      if (remaining <= 0) {
+      // Built once, so the retry visibly asks the same question as the first call.
+      const prompt = buildFitPrompt({ ...rules, advert, company: row.company, title: row.title, location: row.location });
+
+      /**
+       * One call: the judge, the parse and the excerpt check.
+       *
+       * `null` when the time budget has nothing left for a call. Otherwise
+       * `{outcome, retry, models, sample}`, where `retry` marks the three
+       * failure kinds worth asking a second time: the call itself failed or
+       * timed out, the answer was not the one line of JSON, or the excerpt was
+       * not in the advert. A verdict the model actually reached is never
+       * retried. `models` is folded into the tally only for the attempt that
+       * stands, so a retried row is never counted twice under "answered by".
+       * `sample` is what the judge actually said, for the failure line.
+       */
+      const attempt = async () => {
+        const remaining = settings.budgetMs - (now() - firstCallAt);
+        if (remaining <= 0) return null;
+        tally.calls++;
+        const timeoutMs = Math.min(settings.callTimeoutMs, remaining);
+        const controller = new AbortController();
+        let timer = null;
+        try {
+          let answer;
+          try {
+            answer = await Promise.race([
+              judge(prompt, { signal: controller.signal }),
+              new Promise((_, reject) => {
+                timer = setTimeout(() => {
+                  // Reject before aborting: the real judge rejects synchronously on
+                  // abort, and the race must settle on the timeout's reason.
+                  reject(Object.assign(new Error(`timed out after ${Math.round(timeoutMs / 1000)} s`), { timedOut: true }));
+                  controller.abort();
+                }, timeoutMs);
+              }),
+            ]);
+          } catch (err) {
+            return { outcome: review(`fit call failed: ${oneLine(err?.message) || 'unknown error'}`, { failed: true }), retry: true, models: [], sample: '' };
+          }
+          const models = answer?.models || [];
+          const sample = oneLine(answer?.text).slice(0, 200);
+          const parsed = parseFitAnswer(answer?.text, advert);
+          if (!parsed.ok) {
+            return { outcome: review(`fit answer invalid: ${parsed.error}`, { failed: true }), retry: true, models, sample };
+          }
+          if (!parsed.excerptFound) {
+            return { outcome: review(`excerpt not found in the advert; the model said ${parsed.verdict}: ${oneLine(parsed.reason)}`, { excerpt: oneLine(parsed.excerpt) }), retry: true, models, sample };
+          }
+          const outcome = { verdict: parsed.verdict, reason: oneLine(parsed.reason), excerpt: oneLine(parsed.excerpt), failed: false, ceiling: false, allowed: false, held: false };
+          if (outcome.verdict === 'SKIP') {
+            outcome.allowed = allow.has(canonicalize(row.company));
+            outcome.held = outcome.allowed || !settings.skip;
+          }
+          return { outcome, retry: false, models, sample };
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      };
+
+      let result = await attempt();
+      if (result === null) {
         reserved--;
         return record(row, budgetSpent());
       }
-      tally.calls++;
-      const timeoutMs = Math.min(settings.callTimeoutMs, remaining);
-      controller = new AbortController();
-      let answer;
-      try {
-        answer = await Promise.race([
-          judge(buildFitPrompt({ ...rules, advert, company: row.company, title: row.title, location: row.location }), { signal: controller.signal }),
-          new Promise((_, reject) => {
-            timer = setTimeout(() => {
-              // Reject before aborting: the real judge rejects synchronously on
-              // abort, and the race must settle on the timeout's reason.
-              reject(Object.assign(new Error(`timed out after ${Math.round(timeoutMs / 1000)} s`), { timedOut: true }));
-              controller.abort();
-            }, timeoutMs);
-          }),
-        ]);
-      } catch (err) {
-        return record(row, review(`fit call failed: ${oneLine(err?.message) || 'unknown error'}`, { failed: true }));
+      if (result.retry) {
+        // One retry per failed call, and no more: a bad envelope or a timeout is
+        // usually a one-off, and a row that fails twice is a row a person should
+        // see. The retry takes what is left of the run's budget, so a second try
+        // can never push the run past it; with nothing left, the first failure's
+        // REVIEW stands.
+        //
+        // The first failure is kept whether or not the second call rescues it.
+        // Without this, a judge failing every first call would be invisible: the
+        // row would read as a clean verdict and the run would only look slow.
+        tally.retried++;
+        tally.retries.push({
+          company: row.company || '',
+          title: row.title || '',
+          reason: result.outcome.reason,
+          sample: result.sample,
+        });
+        const second = await attempt();
+        if (second !== null) result = second;
       }
-      for (const model of answer?.models || []) tally.models.set(model, (tally.models.get(model) || 0) + 1);
-      const parsed = parseFitAnswer(answer?.text, advert);
-      if (!parsed.ok) {
-        return record(row, review(`fit answer invalid: ${parsed.error}`, { failed: true }));
-      }
-      if (!parsed.excerptFound) {
-        return record(row, review(`excerpt not found in the advert; the model said ${parsed.verdict}: ${oneLine(parsed.reason)}`, { excerpt: oneLine(parsed.excerpt) }));
-      }
-      const outcome = { verdict: parsed.verdict, reason: oneLine(parsed.reason), excerpt: oneLine(parsed.excerpt), failed: false, ceiling: false, allowed: false, held: false };
-      if (outcome.verdict === 'SKIP') {
-        outcome.allowed = allow.has(canonicalize(row.company));
-        outcome.held = outcome.allowed || !settings.skip;
-      }
-      return record(row, outcome);
+      for (const model of result.models) tally.models.set(model, (tally.models.get(model) || 0) + 1);
+      return record(row, result.outcome);
     } finally {
-      if (timer) clearTimeout(timer);
       release();
     }
   }
@@ -306,13 +359,15 @@ export function formatFitSkipReason(reason, date) {
 
 /**
  * The run's fit lines: one summary line, then one line per SKIP and REVIEW
- * with its reason, so a model's verdict is never invisible.
+ * with its reason, so a model's verdict is never invisible, and one line per
+ * first call that failed and was asked again, so a judge that fails every
+ * first call shows up in the run log even when every retry rescues the row.
  */
 export function formatFitSummary(gate) {
   const { tally, settings } = gate;
   const models = [...tally.models.entries()].map(([m, n]) => `${m} ${n}`).join(', ');
   const lines = [
-    `Fit gate:              assessed ${tally.assessed}, PASS ${tally.pass}, SKIP ${tally.skip}, REVIEW ${tally.review}, failed calls ${tally.failed}, ceiling hits ${tally.ceilingHits}`,
+    `Fit gate:              assessed ${tally.assessed}, PASS ${tally.pass}, SKIP ${tally.skip}, REVIEW ${tally.review}, failed calls ${tally.failed}, ceiling hits ${tally.ceilingHits}, retried ${tally.retried}`,
     `                       ${settings.model}, effort ${settings.effort} (flag), calls ${tally.calls}${models ? `, answered by: ${models}` : ''}; SKIP switch ${settings.skip ? 'on' : 'off, SKIPs stay in the Inbox as review'}`,
   ];
   for (const row of tally.rows) {
@@ -321,6 +376,10 @@ export function formatFitSummary(gate) {
       : '';
     const excerpt = row.excerpt ? ` | "${row.excerpt}"` : '';
     lines.push(`FIT ${row.verdict} | ${row.company || '?'} | ${row.title || '?'} | ${row.reason}${excerpt}${held}`);
+  }
+  for (const retry of tally.retries) {
+    const said = retry.sample ? ` | the judge said: "${retry.sample}"` : '';
+    lines.push(`FIT RETRY | ${retry.company || '?'} | ${retry.title || '?'} | first call failed: ${retry.reason}${said}`);
   }
   return lines;
 }
