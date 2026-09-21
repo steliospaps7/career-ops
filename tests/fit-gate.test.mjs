@@ -217,6 +217,31 @@ async function suite() {
     const noRetry = await budgeted.assess(row());
     ok('with the budget spent by the first call there is no retry and the first failure stands',
       noRetry.verdict === 'REVIEW' && /fit answer invalid/.test(noRetry.reason) && late.calls() === 1 && budgeted.tally.calls === 1);
+
+    // The retry's own timeout is clamped to what is left of the budget: 100 ms
+    // here, not the 5 s the call timeout would allow, so a hanging retry cannot
+    // run the clock past the budget.
+    let spent = 0;
+    let made = 0;
+    const clamped = createFitGate({
+      settings: { ...SETTINGS, budgetMs: 1000, callTimeoutMs: 5_000 },
+      rules: RULES,
+      now: () => spent,
+      judge: (prompt, { signal }) => {
+        made++;
+        if (made === 1) {
+          spent = 900;
+          return Promise.resolve({ text: 'Sure, here is my view: PASS' });
+        }
+        return new Promise(() => { signal.addEventListener('abort', () => {}); });
+      },
+    });
+    const startedAt = Date.now();
+    const hung = await clamped.assess(row());
+    const waited = Date.now() - startedAt;
+    ok('a retry with 100 ms of budget left times out on the budget, not on the 5 s call timeout',
+      hung.verdict === 'REVIEW' && /timed out after 0 s/.test(hung.reason) && made === 2 && waited < 1000);
+    eq('and the row counts one retry and two calls', `${clamped.tally.retried} ${clamped.tally.calls}`, '1 2');
   }
 
   // ── The ceilings ────────────────────────────────────────────────────
@@ -290,11 +315,27 @@ async function suite() {
     await gate.assess(row({ title: 'Held' }));
     await gate.assess(row({ title: 'Unsure' }));
     const lines = formatFitSummary(gate);
-    eq('one summary line with the six counts', lines[0], 'Fit gate:              assessed 3, PASS 1, SKIP 1, REVIEW 1, failed calls 0, ceiling hits 0');
+    eq('one summary line with the seven counts', lines[0], 'Fit gate:              assessed 3, PASS 1, SKIP 1, REVIEW 1, failed calls 0, ceiling hits 0, retried 0');
     ok('the model, the effort flag and the switch are named', /claude-opus-5, effort medium \(flag\), calls 3, answered by: claude-opus-5 3; SKIP switch off/.test(lines[1]));
     ok('the SKIP is listed with its reason, excerpt and why it stayed', lines.some((l) => l.startsWith('FIT SKIP | Acme | Held | skip reason | "You will own') && l.endsWith('kept in the Inbox: SKIP switch off')));
     ok('the REVIEW is listed', lines.some((l) => l.startsWith('FIT REVIEW | Acme | Unsure | review reason')));
     ok('the PASS is not', !lines.some((l) => l.includes('| Kept |')));
+    ok('no row was retried, so no retry line', !lines.some((l) => l.startsWith('FIT RETRY')));
+
+    // A row the retry rescued: the verdict is the second answer, and the first
+    // failure is still named in the run log.
+    {
+      const replies = [{ text: 'Sure, here is my view: PASS' }, answer('PASS')];
+      const rescued = gateWith(async () => replies.shift());
+      const outcome = await rescued.assess(row({ title: 'Rescued' }));
+      const out = formatFitSummary(rescued);
+      eq('the rescued row is a PASS', outcome.verdict, 'PASS');
+      ok('the summary line counts the retry', out[0].endsWith('retried 1'));
+      ok('and one line names the row, the failure and what the judge said',
+        out.some((l) => l === 'FIT RETRY | Acme | Rescued | first call failed: fit answer invalid: not JSON | the judge said: "Sure, here is my view: PASS"'));
+      eq('the row itself is not listed, because it passed', out.filter((l) => l.startsWith('FIT PASS')).length, 0);
+      eq('and the model that answered is counted once, not twice', [...rescued.tally.models.values()].join(','), '1');
+    }
 
     const tally = emptyRouteTally();
     countRoute(tally, { route: 'review', bucket: 'unread' });
@@ -444,7 +485,11 @@ process.stdin.on('data', (d) => { input += d; }).on('end', () => {
     eq('no row is queued as anything but PASS or review', (pending.match(/route: standard/g) || []).length, 1);
     eq('the unread row made no call; the other six did, and the two that failed were asked twice', calls1, 8);
 
-    ok('the summary line counts them', out1.includes('Fit gate:              assessed 7, PASS 1, SKIP 2, REVIEW 4, failed calls 1, ceiling hits 0'));
+    ok('the summary line counts them, the two retried rows included', out1.includes('Fit gate:              assessed 7, PASS 1, SKIP 2, REVIEW 4, failed calls 1, ceiling hits 0, retried 2'));
+    ok('and a RETRY line names each first failure and what the judge said',
+      /^FIT RETRY \| Garbled Ltd \| Support Manager \| first call failed: fit answer invalid: not JSON \| the judge said: "Sure, here is my view: PASS"$/m.test(out1)
+      && /^FIT RETRY \| Invent Ltd \| Excerpt Manager \| first call failed: excerpt not found in the advert[^\n]*the judge said: /m.test(out1));
+    ok('the models that answered are counted once per row, never more than the rows assessed', /answered by: fake-model 6;/.test(out1));
     for (const [verdict, company] of [['SKIP', 'Skip Ltd'], ['SKIP', 'Allowed Co'], ['REVIEW', 'Review Ltd'], ['REVIEW', 'Garbled Ltd'], ['REVIEW', 'Unread Ltd'], ['REVIEW', 'Invent Ltd']]) {
       ok(`the summary lists ${verdict} ${company} with its reason`, new RegExp(`^FIT ${verdict} \\| ${company} \\| [^|]+ \\| \\S`, 'm').test(out1));
     }
@@ -463,7 +508,7 @@ process.stdin.on('data', (d) => { input += d; }).on('end', () => {
     const out2 = scan(lane);
     eq('a second scan over the same board leaves the queue byte-identical', readIf(join(lane.dir, 'data', 'pipeline.md')), pipeline1);
     eq('and makes no call', readIf(lane.calls).split('\n').filter(Boolean).length, calls1);
-    ok('its summary assessed nothing', out2.includes('Fit gate:              assessed 0, PASS 0, SKIP 0, REVIEW 0, failed calls 0, ceiling hits 0'));
+    ok('its summary assessed nothing', out2.includes('Fit gate:              assessed 0, PASS 0, SKIP 0, REVIEW 0, failed calls 0, ceiling hits 0, retried 0'));
     ok('every row was a duplicate', /Duplicates:\s+7 skipped/.test(out2));
   } catch (err) {
     fail(`end-to-end scan with the SKIP switch on failed: ${err.message}`);
