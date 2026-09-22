@@ -361,6 +361,38 @@ test("buildPrompt: no known careers page, no employer-first block", () => {
 
   assert.doesNotMatch(prompt, /look THERE FIRST/);
   assert.doesNotMatch(prompt, /aggregator listing/);
+  // ...and with only one block, it is 1a, not a 1b with no 1a above it
+  assert.match(prompt, /\n1a\. THE ADVERT TEXT/);
+  assert.doesNotMatch(prompt, /\n1b\./);
+});
+
+test("buildPrompt: an aggregator row with no saved advert is still sent to the employer", () => {
+  // The row this helps most: nothing saved, and a page that will not answer a
+  // headless read. The employer's own posting is the only way through, so the
+  // block must not depend on there being a saved copy.
+  const prompt = buildPrompt({
+    kind: "evaluate",
+    input: "https://uk.indeed.com/viewjob?jk=deadbeef",
+    memory: "",
+    today: "2026-09-22",
+    advert: { company: "Fred Perry", employerSite: "https://careers.fredperry.com" },
+  });
+
+  assert.match(prompt, /look THERE FIRST for the same title/);
+  // it is the only extra block, so it takes the first label
+  assert.match(prompt, /\n1a\. The posting URL above is an aggregator listing/);
+  assert.doesNotMatch(prompt, /ALREADY ON THIS MACHINE/);
+  // ...and step 1 still sends it to WebFetch, because there is no saved copy
+  assert.match(prompt, /Use WebFetch to read the posting/);
+});
+
+test("buildPrompt: with both blocks they are labelled 1a then 1b", () => {
+  const prompt = fredPerryPrompt({ employerSite: "https://careers.fredperry.com" });
+  assert.match(prompt, /\n1a\. THE ADVERT TEXT/);
+  assert.match(prompt, /\n1b\. The posting URL above is an aggregator listing/);
+  // and the numbered steps that follow are untouched
+  assert.match(prompt, /\n2\. Persist the result CANONICALLY/);
+  assert.match(prompt, /\n3\. NEVER submit an application/);
 });
 
 test("buildPrompt: an employer's own posting is never sent looking for itself", () => {
@@ -379,9 +411,10 @@ test("buildPrompt: an employer's own posting is never sent looking for itself", 
 test("buildPrompt: a row with no saved advert builds the prompt it always did", () => {
   // The whole feature is additive: nothing about a row without a `jd:` field
   // may change, or every existing evaluation quietly drifts.
-  const before = buildPrompt({ kind: "evaluate", input: "https://uk.indeed.com/viewjob?jk=1", memory: "", today: "2026-09-22" });
+  const url = "https://jobs.acme.com/roles/1";
+  const before = buildPrompt({ kind: "evaluate", input: url, memory: "", today: "2026-09-22" });
   for (const advert of [undefined, {}, { company: "Acme" }, { jd: "", company: "Acme", employerSite: "https://acme.com" }]) {
-    const after = buildPrompt({ kind: "evaluate", input: "https://uk.indeed.com/viewjob?jk=1", memory: "", today: "2026-09-22", advert });
+    const after = buildPrompt({ kind: "evaluate", input: url, memory: "", today: "2026-09-22", advert });
     assert.equal(after, before, `advert ${JSON.stringify(advert)} changed a prompt that has no advert to name`);
   }
 });
