@@ -9,7 +9,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPrompt, isShellSafeCompanyName } from "../../src/lib/run-prompts.mjs";
+import { buildPrompt, isShellSafeCompanyName, localJdPath, isAggregatorUrl } from "../../src/lib/run-prompts.mjs";
+import { parseInboxLine } from "../../src/lib/inbox-line.mjs";
 import { OPEN_MARK, CLOSE_MARK } from "../../src/lib/cv-envelope.mjs";
 import { grantsWriteCapability, toolScopeFor } from "../../src/lib/claude-invocation.mjs";
 
@@ -285,5 +286,163 @@ test("buildPrompt: the language directive is not limited to the evaluate prompt"
       /Write all human-facing output in "de"/,
       `kind ${kind} lost the language directive`,
     );
+  }
+});
+
+// ── the saved advert and the employer's own posting (ticket 2e) ──────────────
+//
+// On 22 September 2026 the dashboard's score button was pressed on the Fred
+// Perry row. The worker answered "posting unreadable behind Indeed's login
+// wall; nothing evaluated or written" — while the advert it needed had been
+// saved by that morning's scan and named on the row itself. The prompt built
+// from the URL alone, so the file was never mentioned.
+//
+// The fixture is that exact pipeline.md line, read through the SAME parser the
+// dashboard uses, so these tests cover the whole path from the file to the
+// prompt rather than a hand-built object that agrees with itself.
+
+const FRED_PERRY_LINE =
+  "- [ ] https://uk.indeed.com/viewjob?jk=1505caa519d66118 | Fred Perry | Product Manager - Menswear | London WC1X 0AA | jd: local:jds/fred-perry-product-manager-menswear-eea864f490.md | route: review | fit: REVIEW (the stretch grade and the specialist requirement pull against the consumer-brand pass) | note: local:jds/fred-perry-product-manager-menswear-eea864f490.md";
+
+const FRED_PERRY_JD = "jds/fred-perry-product-manager-menswear-eea864f490.md";
+
+/** The prompt an evaluate run of that row builds, given what the server knows. */
+function fredPerryPrompt(extraFacts = {}) {
+  const row = parseInboxLine(FRED_PERRY_LINE);
+  return buildPrompt({
+    kind: "evaluate",
+    input: row.url,
+    memory: "",
+    today: "2026-09-22",
+    advert: { jd: row.jd, company: row.company, ...extraFacts },
+  });
+}
+
+test("buildPrompt: the Fred Perry row's saved advert is named as the text to read", () => {
+  const prompt = fredPerryPrompt();
+
+  // The file the scan saved, by its path, as the source of the advert text
+  assert.ok(prompt.includes(FRED_PERRY_JD), "the prompt must name the saved advert file");
+  assert.match(prompt, /ALREADY ON THIS MACHINE/);
+  // ...and the fetch sentence no longer sends the worker to the URL for the text
+  assert.match(prompt, /Take the posting text from the saved advert/);
+});
+
+test("buildPrompt: an unreadable posting page no longer stops the evaluation", () => {
+  // This is the regression that cost the run: "could not read the page" was
+  // treated as "nothing to evaluate". Liveness is reported, never a veto —
+  // only evidence the posting is CLOSED stops Block A.
+  const prompt = fredPerryPrompt();
+
+  assert.match(prompt, /do not let it stop you/i);
+  assert.match(prompt, /login wall/i);
+  assert.match(prompt, /Verification: unconfirmed \(batch mode\); advert read from the saved copy/);
+  assert.match(prompt, /Only evidence that the posting is CLOSED[^\n]*stops the evaluation/);
+});
+
+test("buildPrompt: an aggregator row with a known careers page is sent to the employer first", () => {
+  // Fred Perry has no board line in portals.yml yet — the Tiers chat adds its
+  // Teamtailor board. This is the prompt the same row builds once it does.
+  const prompt = fredPerryPrompt({ employerSite: "https://careers.fredperry.com" });
+
+  assert.match(prompt, /look THERE FIRST for the same title/);
+  assert.ok(prompt.includes("https://careers.fredperry.com"), "the employer's careers page must be named");
+  assert.ok(prompt.includes("Fred Perry's"), "the block must name the company");
+  // the found URL goes on the report header's URL line...
+  assert.match(prompt, /write that employer URL on the report's `\*\*URL:\*\*` line/);
+  // ...and NOT into the tracker's dedup field, which stays the row's own URL
+  assert.match(prompt, /tracker row's last field stays the posting URL above/);
+});
+
+test("buildPrompt: no known careers page, no employer-first block", () => {
+  // Fred Perry as the file stands today. A block naming no page would be an
+  // instruction to go and guess one.
+  const prompt = fredPerryPrompt();
+
+  assert.doesNotMatch(prompt, /look THERE FIRST/);
+  assert.doesNotMatch(prompt, /aggregator listing/);
+});
+
+test("buildPrompt: an employer's own posting is never sent looking for itself", () => {
+  const prompt = buildPrompt({
+    kind: "evaluate",
+    input: "https://job-boards.greenhouse.io/capitalontap/jobs/4",
+    memory: "",
+    today: "2026-09-22",
+    advert: { jd: "local:jds/capital-on-tap-pm-abc1234567.md", company: "Capital on Tap", employerSite: "https://job-boards.greenhouse.io/capitalontap" },
+  });
+
+  assert.ok(prompt.includes("jds/capital-on-tap-pm-abc1234567.md"), "the saved advert still applies");
+  assert.doesNotMatch(prompt, /look THERE FIRST/, "a direct board URL is not an aggregator copy");
+});
+
+test("buildPrompt: a row with no saved advert builds the prompt it always did", () => {
+  // The whole feature is additive: nothing about a row without a `jd:` field
+  // may change, or every existing evaluation quietly drifts.
+  const before = buildPrompt({ kind: "evaluate", input: "https://uk.indeed.com/viewjob?jk=1", memory: "", today: "2026-09-22" });
+  for (const advert of [undefined, {}, { company: "Acme" }, { jd: "", company: "Acme", employerSite: "https://acme.com" }]) {
+    const after = buildPrompt({ kind: "evaluate", input: "https://uk.indeed.com/viewjob?jk=1", memory: "", today: "2026-09-22", advert });
+    assert.equal(after, before, `advert ${JSON.stringify(advert)} changed a prompt that has no advert to name`);
+  }
+});
+
+test("buildPrompt: the evaluate prompt still states VERDICT once with an advert", () => {
+  // job-store.tsx parses that final line; two extra numbered steps must not
+  // introduce a second match.
+  const mentions = fredPerryPrompt({ employerSite: "https://careers.fredperry.com" }).match(/VERDICT:/g) ?? [];
+  assert.equal(mentions.length, 1);
+});
+
+test("localJdPath: accepts every capture writer's filename", () => {
+  // AGENTS.md, "JD captures": several writers coexist and none is canonical.
+  assert.equal(localJdPath(`local:${FRED_PERRY_JD}`), FRED_PERRY_JD);
+  assert.equal(localJdPath(`  local:${FRED_PERRY_JD}  `), FRED_PERRY_JD);
+  // archive-posting.mjs saves a PDF, with the report number in front
+  assert.equal(localJdPath("local:jds/064-2026-09-22_fred-perry_product-manager.pdf"), "jds/064-2026-09-22_fred-perry_product-manager.pdf");
+  assert.equal(localJdPath("local:jds/acme role.txt"), "jds/acme role.txt");
+});
+
+test("localJdPath: refuses a path that could climb out of jds/", () => {
+  // The value reaches this code from a scanned posting, so a path that leaves
+  // jds/ or names another file must never become "read this file".
+  for (const bad of [
+    "local:../cv.md",
+    "local:jds/../cv.md",
+    "local:jds/..%2fcv.md".replace("%2f", "/"),
+    "local:/etc/passwd",
+    "local:jds/nested/x.md",
+    "local:jds\\..\\cv.md",
+    "local:jds/.env.md",
+    "local:jds/x.yml",
+    "local:jds/x",
+    "jds/x.md",
+    "https://example.com/x.md",
+    "",
+    undefined,
+    null,
+  ]) {
+    assert.equal(localJdPath(bad), null, `accepted ${JSON.stringify(bad)}`);
+  }
+});
+
+test("isAggregatorUrl: matches the host, not the string", () => {
+  for (const url of [
+    "https://uk.indeed.com/viewjob?jk=1505caa519d66118",
+    "https://indeed.com/viewjob?jk=1",
+    "https://www.linkedin.com/jobs/view/123",
+    "https://www.glassdoor.co.uk/job-listing/x",
+  ]) {
+    assert.equal(isAggregatorUrl(url), true, url);
+  }
+  for (const url of [
+    "https://careers.fredperry.com/jobs/8414770-product-manager-menswear",
+    "https://job-boards.greenhouse.io/capitalontap",
+    // the aggregator's name inside a path or a query is not its host
+    "https://jobs.acme.com/apply?ref=indeed.com",
+    "https://notindeed.com/jobs/1",
+    "not a url",
+    "",
+  ]) {
+    assert.equal(isAggregatorUrl(url), false, String(url));
   }
 });

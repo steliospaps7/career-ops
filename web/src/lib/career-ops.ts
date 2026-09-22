@@ -7,6 +7,7 @@ import { parseApplications } from "@/lib/tracker-table.mjs";
 // run-cli-support.mjs — see report-files.mjs for why it lives there.
 import { isReservedReportFile } from "@/lib/report-files.mjs";
 import { parseInboxLine } from "@/lib/inbox-line.mjs";
+import { readAdvertFacts as advertFacts, type AdvertFacts } from "@/lib/advert-facts.mjs";
 import { markTrackedInbox } from "@/lib/inbox-tracked.mjs";
 import { orderInboxByScan } from "@/lib/inbox-order.mjs";
 import { resolvePdfIndexPath } from "@/lib/core/pdf-index";
@@ -59,7 +60,7 @@ function read(rel: string): string | null {
   }
 }
 
-export type InboxJob = { url: string; company: string; role: string; location?: string; compensation?: string; done: boolean; postedAt?: string; scannedAt?: string; fit?: string; route?: string };
+export type InboxJob = { url: string; company: string; role: string; location?: string; compensation?: string; done: boolean; postedAt?: string; scannedAt?: string; fit?: string; route?: string; jd?: string };
 
 /** Parse data/pipeline.md into inbox jobs. The per-line rule, labeled segments
  *  included, lives in lib/inbox-line.mjs so it can be tested without a build. */
@@ -98,6 +99,16 @@ export function readScanDates(): Map<string, string> {
     if (/^\d{4}-\d{2}-\d{2}$/.test(firstSeen) && !dates.has(url)) dates.set(url, firstSeen);
   }
   return dates;
+}
+
+/** The advert facts for one inbox row, for the evaluate prompt (ticket 2e):
+ *  the advert the scan already saved, and the employer's own careers page.
+ *  Both lookups live in advert-facts.mjs so they can be tested against a
+ *  fixture tree with no build step; this supplies the checkout they read. */
+export function readAdvertFacts(job: InboxJob | undefined): AdvertFacts | undefined {
+  // The checkout is runtime user data, not a build input — same reason every
+  // other dynamic path in this file carries the hint.
+  return advertFacts(job, /* turbopackIgnore: true */ careerOpsRoot());
 }
 
 export type Application = {
