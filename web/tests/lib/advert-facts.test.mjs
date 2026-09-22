@@ -65,10 +65,10 @@ test("portals.yml's careers_url is the employer's page, with api as the fallback
     ].join("\n"),
   });
 
-  assert.equal(
-    readAdvertFacts({ company: "capital on tap" }, root).employerSite,
-    "https://job-boards.greenhouse.io/capitalontap",
-    "careers_url wins, and the name match ignores case",
+  assert.deepEqual(
+    readAdvertFacts({ company: "capital on tap" }, root),
+    { company: "capital on tap", employerSite: "https://job-boards.greenhouse.io/capitalontap", employerSiteKind: "careers" },
+    "careers_url wins, is marked a careers page, and the name match ignores case",
   );
   assert.equal(
     readAdvertFacts({ company: "Api Only" }, root).employerSite,
@@ -85,8 +85,13 @@ test("companies.tsv's website is used when portals.yml has no line", () => {
     companies: ["name\tlinkedin\tsize\twebsite\ttier", "Lupa\tlupapets\t77\thttps://lupapets.com\t1", "No Site\t\t\t\t2"].join("\n"),
   });
 
-  assert.equal(readAdvertFacts({ company: "Lupa" }, root).employerSite, "https://lupapets.com");
+  const lupa = readAdvertFacts({ company: "Lupa" }, root);
+  assert.equal(lupa.employerSite, "https://lupapets.com");
+  // ...and marked as a HOMEPAGE, because that is what the column holds. The
+  // prompt says "find its careers page" for this, not "look here for the title".
+  assert.equal(lupa.employerSiteKind, "site");
   assert.equal(readAdvertFacts({ company: "No Site" }, root).employerSite, undefined);
+  assert.equal(readAdvertFacts({ company: "No Site" }, root).employerSiteKind, undefined);
 });
 
 test("a broken or missing file leaves the field unset, never throws", () => {
@@ -108,6 +113,7 @@ test("a company name is matched whole, never by prefix", () => {
     portals: "tracked_companies:\n  - name: Fred Perry\n    careers_url: https://careers.fredperry.com\n",
   });
   assert.equal(readAdvertFacts({ company: "Fred Perry" }, root).employerSite, "https://careers.fredperry.com");
+  assert.equal(readAdvertFacts({ company: "Fred Perry" }, root).employerSiteKind, "careers");
   assert.equal(readAdvertFacts({ company: "Fred" }, root).employerSite, undefined);
   assert.equal(readAdvertFacts({ company: "Fred Perry Ltd" }, root).employerSite, undefined);
 });

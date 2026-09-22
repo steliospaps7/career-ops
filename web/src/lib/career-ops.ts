@@ -102,7 +102,8 @@ export function readScanDates(): Map<string, string> {
 }
 
 /** The advert facts for one inbox row, for the evaluate prompt (ticket 2e):
- *  the advert the scan already saved, and the employer's own careers page.
+ *  the advert the scan already saved, and the employer's own page (with what
+ *  kind of page it is — a careers board, or only the company homepage).
  *  Both lookups live in advert-facts.mjs so they can be tested against a
  *  fixture tree with no build step; this supplies the checkout they read. */
 export function readAdvertFacts(job: InboxJob | undefined): AdvertFacts | undefined {

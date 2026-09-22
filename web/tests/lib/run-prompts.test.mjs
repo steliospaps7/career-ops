@@ -340,18 +340,62 @@ test("buildPrompt: an unreadable posting page no longer stops the evaluation", (
   assert.match(prompt, /Only evidence that the posting is CLOSED[^\n]*stops the evaluation/);
 });
 
-test("buildPrompt: an aggregator row with a known careers page is sent to the employer first", () => {
+test("buildPrompt: an aggregator row with a known careers page is sent to the employer", () => {
   // Fred Perry has no board line in portals.yml yet — the Tiers chat adds its
   // Teamtailor board. This is the prompt the same row builds once it does.
   const prompt = fredPerryPrompt({ employerSite: "https://careers.fredperry.com" });
 
-  assert.match(prompt, /look THERE FIRST for the same title/);
+  assert.match(prompt, /check THERE for the same title/);
   assert.ok(prompt.includes("https://careers.fredperry.com"), "the employer's careers page must be named");
   assert.ok(prompt.includes("Fred Perry's"), "the block must name the company");
   // the found URL goes on the report header's URL line...
-  assert.match(prompt, /write that employer URL on the report's `\*\*URL:\*\*` line/);
+  assert.match(prompt, /gives you the URL to write on the report's `\*\*URL:\*\*` line/);
   // ...and NOT into the tracker's dedup field, which stays the row's own URL
   assert.match(prompt, /tracker row's last field stays the posting URL above/);
+});
+
+test("buildPrompt: with a saved advert, the employer page settles the LINK, never the text", () => {
+  // Two instructions that both claim to name the posting is how a worker ends
+  // up scoring one page and citing another. With 1a supplying the text, 1b is
+  // confined to liveness and the URL.
+  const prompt = fredPerryPrompt({ employerSite: "https://careers.fredperry.com" });
+
+  assert.match(prompt, /THIS IS ABOUT THE LINK, NOT THE TEXT/);
+  assert.match(prompt, /the saved advert in 1a stays what you read and score/);
+  assert.match(prompt, /nothing on the employer's page changes a score/);
+  // the one way the employer page CAN change the outcome
+  assert.match(prompt, /shows the role closed, withdrawn or gone, THAT is evidence the posting is closed/);
+  assert.match(prompt, /follow modes\/oferta\.md's rule for a dead posting/);
+  // and not finding it proves nothing
+  assert.match(prompt, /cannot find it there, that is not evidence of anything/);
+  // the pre-review wording, which competed with 1a, is gone
+  assert.doesNotMatch(prompt, /use it as the posting/);
+  assert.doesNotMatch(prompt, /preferring it over the aggregator listing/);
+});
+
+test("buildPrompt: a homepage is not called a careers page", () => {
+  // data/companies.tsv's `website` column holds lupapets.com, hook.co — a
+  // marketing homepage. "Look here for the same title" is the wrong order there.
+  const site = buildPrompt({
+    kind: "evaluate",
+    input: "https://uk.indeed.com/viewjob?jk=1",
+    memory: "",
+    today: "2026-09-22",
+    advert: { company: "Lupa", employerSite: "https://lupapets.com", employerSiteKind: "site" },
+  });
+  assert.match(site, /Lupa's own site is https:\/\/lupapets\.com — find its careers or jobs page and check THERE/);
+  assert.doesNotMatch(site, /own careers page is https:\/\/lupapets\.com/);
+
+  // an unmarked page keeps the careers-page wording: portals.yml is the only
+  // other source, and every one of its entries is a careers page
+  const careers = buildPrompt({
+    kind: "evaluate",
+    input: "https://uk.indeed.com/viewjob?jk=1",
+    memory: "",
+    today: "2026-09-22",
+    advert: { company: "Lupa", employerSite: "https://jobs.ashbyhq.com/lupapets", employerSiteKind: "careers" },
+  });
+  assert.match(careers, /Lupa's own careers page is https:\/\/jobs\.ashbyhq\.com\/lupapets — check THERE for the same title/);
 });
 
 test("buildPrompt: no known careers page, no employer-first block", () => {
@@ -359,7 +403,7 @@ test("buildPrompt: no known careers page, no employer-first block", () => {
   // instruction to go and guess one.
   const prompt = fredPerryPrompt();
 
-  assert.doesNotMatch(prompt, /look THERE FIRST/);
+  assert.doesNotMatch(prompt, /check THERE for the same title/);
   assert.doesNotMatch(prompt, /aggregator listing/);
   // ...and with only one block, it is 1a, not a 1b with no 1a above it
   assert.match(prompt, /\n1a\. THE ADVERT TEXT/);
@@ -378,7 +422,10 @@ test("buildPrompt: an aggregator row with no saved advert is still sent to the e
     advert: { company: "Fred Perry", employerSite: "https://careers.fredperry.com" },
   });
 
-  assert.match(prompt, /look THERE FIRST for the same title/);
+  assert.match(prompt, /check THERE for the same title/);
+  // with nothing saved, the employer page IS the posting — that wording stays
+  assert.match(prompt, /read that page and use it as the posting/);
+  assert.doesNotMatch(prompt, /THIS IS ABOUT THE LINK, NOT THE TEXT/);
   // it is the only extra block, so it takes the first label
   assert.match(prompt, /\n1a\. The posting URL above is an aggregator listing/);
   assert.doesNotMatch(prompt, /ALREADY ON THIS MACHINE/);
@@ -405,7 +452,7 @@ test("buildPrompt: an employer's own posting is never sent looking for itself", 
   });
 
   assert.ok(prompt.includes("jds/capital-on-tap-pm-abc1234567.md"), "the saved advert still applies");
-  assert.doesNotMatch(prompt, /look THERE FIRST/, "a direct board URL is not an aggregator copy");
+  assert.doesNotMatch(prompt, /check THERE for the same title/, "a direct board URL is not an aggregator copy");
 });
 
 test("buildPrompt: a row with no saved advert builds the prompt it always did", () => {

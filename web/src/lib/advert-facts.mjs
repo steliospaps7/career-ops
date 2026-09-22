@@ -17,7 +17,8 @@ import path from "node:path";
 import * as yaml from "js-yaml";
 import { localJdPath } from "./run-prompts.mjs";
 
-/** @typedef {{jd?: string, company?: string, employerSite?: string}} AdvertFacts */
+/** @typedef {{jd?: string, company?: string, employerSite?: string,
+ *              employerSiteKind?: "careers" | "site"}} AdvertFacts */
 
 /**
  * The advert facts for one inbox row.
@@ -30,9 +31,15 @@ import { localJdPath } from "./run-prompts.mjs";
  *    open is worse than none: it sends it looking for text that is not there.
  *    The accepted shape is localJdPath's, shared with the prompt itself, so the
  *    check here and the instruction there cannot drift.
- *  - `employerSite`: the company's own careers page, from portals.yml's
- *    tracked_companies (careers_url, else the api URL) and failing that the
- *    `website` column of data/companies.tsv.
+ *  - `employerSite`, with `employerSiteKind` saying what kind of page it is.
+ *    portals.yml's tracked_companies gives a real careers page (`careers_url`,
+ *    else the api URL) → "careers". data/companies.tsv's `website` column is
+ *    the company HOMEPAGE — lupapets.com, hook.co — → "site". The distinction
+ *    has to travel with the URL because it cannot be recovered from the URL's
+ *    shape: `suna.health/careers` and `many-group.com/careers` are careers_url
+ *    values that look exactly like a homepage path, and a board slug like
+ *    `jobs.ashbyhq.com/lupapets` looks nothing like either. Telling a worker to
+ *    "look here for the title" at a homepage sends it to a marketing page.
  *
  * Company names are matched whole and case-insensitively. A company that
  * appears under a second spelling gets an alias line in portals.yml, which is
@@ -54,7 +61,10 @@ export function readAdvertFacts(job, root) {
   if (rel && fileExists(path.join(root, rel))) facts.jd = String(job.jd).trim();
 
   const site = employerCareersUrl(company, root);
-  if (site) facts.employerSite = site;
+  if (site) {
+    facts.employerSite = site.url;
+    facts.employerSiteKind = site.kind;
+  }
 
   return facts;
 }
@@ -78,7 +88,7 @@ function readText(file) {
 }
 
 /** portals.yml → the company's careers_url, else its api URL, else undefined.
- *  @param {string} company @param {string} root */
+ *  @param {string} company @param {string} root @returns {string | undefined} */
 function portalsCareersUrl(company, root) {
   const source = readText(path.join(root, "portals.yml"));
   if (!source) return undefined;
@@ -103,8 +113,9 @@ function portalsCareersUrl(company, root) {
   return undefined;
 }
 
-/** data/companies.tsv → the company's `website` cell, else undefined.
- *  @param {string} company @param {string} root */
+/** data/companies.tsv → the company's `website` cell, else undefined. This is
+ *  the company homepage, not a careers page — see readAdvertFacts.
+ *  @param {string} company @param {string} root @returns {string | undefined} */
 function companiesWebsite(company, root) {
   const tsv = readText(path.join(root, "data", "companies.tsv"));
   if (!tsv) return undefined;
@@ -125,8 +136,14 @@ function companiesWebsite(company, root) {
   return undefined;
 }
 
-/** @param {string} company @param {string} root */
+/** The best page this checkout knows for the employer, and what kind it is.
+ *  portals.yml wins: a careers page is where the title actually is.
+ *  @param {string} company @param {string} root
+ *  @returns {{url: string, kind: "careers" | "site"} | undefined} */
 function employerCareersUrl(company, root) {
   if (!company) return undefined;
-  return portalsCareersUrl(company, root) ?? companiesWebsite(company, root);
+  const careers = portalsCareersUrl(company, root);
+  if (careers) return { url: careers, kind: "careers" };
+  const site = companiesWebsite(company, root);
+  return site ? { url: site, kind: "site" } : undefined;
 }

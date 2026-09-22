@@ -47,7 +47,8 @@ const SAFE_COMPANY_NAME = /^[\p{L}\p{N} .,&'()+/-]+$/u;
  *
  * @param {{kind: string, input: string, memory: string, today: string,
  *          postedAt?: string, lang?: object,
- *          advert?: {jd?: string, company?: string, employerSite?: string}}} args
+ *          advert?: {jd?: string, company?: string, employerSite?: string,
+ *                    employerSiteKind?: "careers" | "site"}}} args
  * @returns {string}
  */
 /** ISO calendar date, the only form the dashboard's POSTED column parses. */
@@ -208,16 +209,30 @@ End with EXACTLY one final line: VERDICT: {5 if now live, else 1}/5 — {what yo
   //     req, not to veto text already on disk, so here it is demoted to a
   //     reported observation. Same shape as oferta's own rule for pasted JD
   //     text: evaluate, note that liveness is unverifiable.
-  //   - the LINK is still worth improving. An aggregator listing is a copy; the
-  //     employer's own posting is the original, so when the company's careers
-  //     page is known the worker looks there for the same title and records
-  //     that URL in the report header.
+  //   - the LINK is a separate question, and when 1a supplies the text it stays
+  //     separate. An aggregator listing is a copy; the employer's own posting is
+  //     the original, so when the company's page is known the worker checks
+  //     there for the same title. With a saved advert that check is about the
+  //     link and its liveness only — the saved text remains what the evaluation
+  //     is scored from, and the employer page changes the verdict only by
+  //     showing the role closed. With NO saved advert the employer page is the
+  //     only readable copy, so there it becomes the posting itself.
   //
   // Both blocks are absent unless the caller supplies the facts, so a row with
   // no `jd:` field produces the prompt it always did.
   const jdFile = localJdPath(advert?.jd);
   const advertCompany = String(advert?.company ?? "").trim();
   const employerSite = String(advert?.employerSite ?? "").trim();
+  // portals.yml gives a careers page; data/companies.tsv gives a homepage. The
+  // two need different instructions — "look here for the title" is wrong at
+  // lupapets.com — so the source travels with the URL rather than being guessed
+  // from its shape (a homepage and a board URL are not distinguishable by eye:
+  // suna.health/careers and many-group.com/careers are both careers_url values).
+  const employerSiteIsCareersPage = advert?.employerSiteKind !== "site";
+  const whose = advertCompany ? `${advertCompany}'s` : "The employer's";
+  const employerPointer = employerSiteIsCareersPage
+    ? `${whose} own careers page is ${employerSite} — check THERE for the same title.`
+    : `${whose} own site is ${employerSite} — find its careers or jobs page and check THERE for the same title.`;
 
   const extraSteps = [];
   if (jdFile) {
@@ -227,7 +242,9 @@ End with EXACTLY one final line: VERDICT: {5 if now live, else 1}/5 — {what yo
   }
   if (isAggregatorUrl(input) && employerSite) {
     extraSteps.push(
-      `The posting URL above is an aggregator listing, which is why its page may be unreadable.${advertCompany ? ` ${advertCompany}'s` : " The employer's"} own careers page is ${employerSite} — look THERE FIRST for the same title. If you find the same role there, read that page and use it as the posting, preferring it over the aggregator listing wherever the two differ, and write that employer URL on the report's \`**URL:**\` line. If you cannot find it there, write the posting URL above on that line and say in one sentence that the employer's own page did not list it. The tracker row's last field stays the posting URL above either way — it is what merge-tracker dedupes on.`,
+      jdFile
+        ? `The posting URL above is an aggregator listing, which is why its page may be unreadable. ${employerPointer} THIS IS ABOUT THE LINK, NOT THE TEXT: the saved advert in 1a stays what you read and score, and nothing on the employer's page changes a score. Finding the role there does two things and only two — it settles the liveness check the aggregator page could not, and it gives you the URL to write on the report's \`**URL:**\` line. If the employer's own page shows the role closed, withdrawn or gone, THAT is evidence the posting is closed: say which page said so and follow ${resolvedLang.evalModeFile}'s rule for a dead posting. If you simply cannot find it there, that is not evidence of anything — write the posting URL above on the \`**URL:**\` line and say in one sentence that the employer's own page did not list it. The tracker row's last field stays the posting URL above in every case — it is what merge-tracker dedupes on.`
+        : `The posting URL above is an aggregator listing, which is why its page may be unreadable. ${employerPointer} If you find the same role there, read that page and use it as the posting, preferring it over the aggregator listing wherever the two differ, and write that employer URL on the report's \`**URL:**\` line. If you cannot find it there, write the posting URL above on that line and say in one sentence that the employer's own page did not list it. The tracker row's last field stays the posting URL above either way — it is what merge-tracker dedupes on.`,
     );
   }
   // Labelled 1a, 1b in the order they appear, so the worker reads them as parts
