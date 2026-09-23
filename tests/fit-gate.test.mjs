@@ -29,6 +29,8 @@ import {
   claudeJudgeArgs,
   formatFitValue,
   formatFitSummary,
+  formatFitSkipReason,
+  collectFitCuts,
   FIT_GATE_CONCURRENCY,
 } from '../providers/_fit-gate.mjs';
 import { FIT_SYSTEM_PROMPT } from '../providers/_fit-prompt.mjs';
@@ -41,7 +43,9 @@ import {
   extractFitSegment,
   readPipelineAdverts,
   buildAdvertGate,
+  buildCompanyCanonicalizer,
 } from '../scan.mjs';
+import { localToday } from '../lib/local-today.mjs';
 import { saveAdvert } from '../providers/_advert-reader.mjs';
 import { pass, fail, rmSync, ROOT, NODE } from './helpers.mjs';
 
@@ -105,6 +109,64 @@ async function suite() {
     const held = await off.assess(row());
     ok('with the SKIP switch off a SKIP is held in the queue', held.verdict === 'SKIP' && held.held === true && held.allowed === false);
     eq('and its segment names the verdict and the reason', formatFitValue(held), 'SKIP (skip reason)');
+  }
+
+  // ── Repeats (ticket 2g): a seat the gate cut within 14 days is not judged again ──
+  {
+    // Two of the four re-listed seats the 23 September 2026 09:00 run sent to
+    // the judge again, as the 22 September 17:00 run left them in Processed,
+    // and the third, whose longer title must not match.
+    const PROCESSED = [
+      '- [x] https://uk.linkedin.com/jobs/view/commercial-associate-at-collectiv-food-certified-b-corp-4470403476 | Collectiv Food / Certified B Corp | Commercial Associate | London Area, United Kingdom | jd: local:jds/collectiv-food-certified-b-corp-commercial-associate-45fc3dbedc.md | route: standard | skipped (fit: Stated salary of £29k is below the hard floor of £45,000., 2026-09-22)',
+      '- [x] https://uk.linkedin.com/jobs/view/chief-of-staff-at-houses-of-parliament-restoration-renewal-4468909045 | Houses of Parliament Restoration & Renewal | Chief of Staff | London Area, United Kingdom | route: standard | skipped (fit: Chief-executive support is the admin shape of operations, at a government body., 2026-09-22)',
+      '- [x] https://uk.indeed.com/viewjob?jk=f773d73c6e95041c | Fanatics | Chief of Staff to the President, International | London | route: standard | skipped (fit: Fanatics is far above the ~1,000-staff cut., 2026-09-22)',
+      '- [x] https://jobs.example.com/edge | Edge Ltd | Growth Manager | skipped (fit: below the floor, 2026-09-09)',
+      '- [x] https://jobs.example.com/allowed | Allowed Co | Operations Manager | skipped (fit: outsourced contact centres, 2026-09-22)',
+      // None of these is a cut that stands: a Planner's tick, a queued REVIEW
+      // and PASS, a reopened cut, a cut 15 days old, and a repeat whose own
+      // judgement is 15 days old.
+      '- [x] https://jobs.example.com/tick | Ticked Ltd | Operations Manager | skipped (expired, Planner, 2026-09-22)',
+      '- [ ] https://jobs.example.com/review | Review Ltd | Partnerships Manager | route: review | fit: REVIEW (the rules pull both ways)',
+      '- [ ] https://jobs.example.com/pass | Pass Ltd | Product Manager | route: standard | fit: PASS',
+      '- [ ] https://jobs.example.com/reopened | Granola | Operations Generalist | London | skipped (fit: admin shape, 2026-09-21) | note: reopened on his word 22 September',
+      '- [x] https://jobs.example.com/old | Old Ltd | Growth Manager | skipped (fit: below the floor, 2026-09-08)',
+      '- [x] https://jobs.example.com/chain | Chain Ltd | Growth Manager | skipped (fit: SKIP (repeat of 2026-09-08), 2026-09-20)',
+    ].join('\n');
+    const canonicalize = buildCompanyCanonicalizer({ 'Houses of Parliament Restoration & Renewal': ['Houses of Parliament Restoration and Renewal'] });
+    const cuts = collectFitCuts(PROCESSED, { canonicalize, today: '2026-09-23' });
+    eq('only the gate\'s own cuts inside 14 days are read', [...cuts.values()].sort().join(' '), '2026-09-09 2026-09-22 2026-09-22 2026-09-22 2026-09-22');
+
+    let calls = 0;
+    const judge = async () => { calls++; return answer('PASS'); };
+    const gate = createFitGate({ settings: SETTINGS, rules: RULES, judge, canonicalize, priorCuts: cuts });
+    const collectiv = await gate.assess(row({ company: 'Collectiv Food | Certified B Corp', title: 'Commercial Associate' }));
+    ok('Collectiv Food, back with the board\'s pipe in its name, is a SKIP that leaves the Inbox',
+      collectiv.verdict === 'SKIP' && collectiv.held === false && collectiv.reason === 'SKIP (repeat of 2026-09-22)');
+    eq('and is filed as fit: SKIP (repeat of <date>)', formatFitSkipReason(collectiv.reason, '2026-09-23'), 'skipped (fit: SKIP (repeat of 2026-09-22), 2026-09-23)');
+    const hop = await gate.assess(row({ company: 'Houses of Parliament Restoration and Renewal', title: 'CHIEF OF STAFF' }));
+    ok('Houses of Parliament under its other spelling, through company_aliases, title in another case, is a repeat', hop.verdict === 'SKIP' && hop.repeatOf === '2026-09-22');
+    const edge = await gate.assess(row({ company: 'Edge Ltd', title: 'Growth Manager' }));
+    ok('a cut exactly 14 days old still stands', edge.repeatOf === '2026-09-09');
+    eq('none of the three made a call', calls, 0);
+
+    const fanatics = await gate.assess(row({ company: 'Fanatics', title: 'Chief of Staff to the President, International - Fanatics Collectibles' }));
+    ok('a longer title is never a prefix match: Fanatics Collectibles is judged', fanatics.verdict === 'PASS' && !fanatics.repeatOf && calls === 1);
+    for (const [company, title] of [['Ticked Ltd', 'Operations Manager'], ['Review Ltd', 'Partnerships Manager'], ['Pass Ltd', 'Product Manager'], ['Granola', 'Operations Generalist'], ['Old Ltd', 'Growth Manager'], ['Chain Ltd', 'Growth Manager']]) {
+      await gate.assess(row({ company, title }));
+    }
+    eq('a Planner\'s tick, a queued REVIEW or PASS, a reopened cut and a stale cut are all judged', calls, 7);
+    const allowed = await gate.assess(row({ company: 'Allowed Co', title: 'Operations Manager' }));
+    ok('an always_allow company is judged, never filed as a repeat', !allowed.repeatOf && calls === 8);
+    const off = createFitGate({ settings: { ...SETTINGS, skip: false }, rules: RULES, judge, canonicalize, priorCuts: cuts });
+    const offRow = await off.assess(row({ company: 'Collectiv Food | Certified B Corp', title: 'Commercial Associate' }));
+    ok('with the SKIP switch off a repeat is judged as before', !offRow.repeatOf && calls === 9);
+
+    eq('repeats sit outside assessed', gate.tally.assessed, 8);
+    const lines = formatFitSummary(gate);
+    ok('the summary line is unchanged', lines[0].startsWith('Fit gate:              assessed 8, PASS 8, SKIP 0,'));
+    ok('a repeats line counts the three', lines.includes('Fit gate repeats:      3 cut by the gate within 14 days, filed again with no call'));
+    ok('and one line names each with its date', lines.includes('FIT REPEAT | Houses of Parliament Restoration and Renewal | CHIEF OF STAFF | cut on 2026-09-22, not judged again'));
+    ok('a run with no repeat prints no repeats line', !formatFitSummary(off).some((l) => l.includes('repeat')));
   }
 
   // ── Every failure is REVIEW, never PASS ────────────────────────────
@@ -417,26 +479,26 @@ process.stdin.on('data', (d) => { input += d; }).on('end', () => {
     'CAREER_OPS_SCAN_HISTORY', 'CAREER_OPS_SCAN_SOURCES', 'CAREER_OPS_TRACKER', 'CAREER_OPS_TIERS'];
 
   /** A lane: temp data root, fixture board, stored adverts, a profile. */
-  function makeLane(fitGateYaml) {
+  function makeLane(fitGateYaml, { board = BOARD, positives = [], pipeline = '# Pipeline\n\n## Pending\n\n## Processed\n' } = {}) {
     const dir = tempDir();
     mkdirSync(join(dir, 'data'), { recursive: true });
     mkdirSync(join(dir, 'rules'), { recursive: true });
     writeFileSync(join(dir, 'data', 'applications.md'), '# Applications Tracker\n\n| # | Date | Company | Role | Score | Status | PDF | Report | Notes |\n|---|------|---------|------|-------|--------|-----|--------|-------|\n');
-    writeFileSync(join(dir, 'data', 'pipeline.md'), '# Pipeline\n\n## Pending\n\n## Processed\n');
+    writeFileSync(join(dir, 'data', 'pipeline.md'), pipeline);
     writeFileSync(join(dir, 'rules', 'brief.md'), RULES.brief);
     writeFileSync(join(dir, 'rules', 'criteria.md'), RULES.criteria);
     const judge = join(dir, 'fake-claude.mjs');
     writeFileSync(judge, FAKE_JUDGE);
-    for (const job of BOARD) {
+    for (const job of board) {
       saveAdvert({ ...job, rung: job.status ? null : 'page', status: job.status || 'read' }, { jdsDir: join(dir, 'jds') });
     }
     const portals = join(dir, 'portals.yml');
-    writeFileSync(portals, `title_filter:\n  positive:\n    - "Manager"\ntracked_companies:\n  - name: Fit Board\n    careers_url: https://boards.example.com/fit\n    parser:\n      command: node\n      script: tests/fit-gate.test.mjs\n`);
+    writeFileSync(portals, `title_filter:\n  positive:\n    - "Manager"\n${positives.map((p) => `    - "${p}"\n`).join('')}tracked_companies:\n  - name: Fit Board\n    careers_url: https://boards.example.com/fit\n    parser:\n      command: node\n      script: tests/fit-gate.test.mjs\n`);
     const profile = join(dir, 'profile.yml');
     writeFileSync(profile, fitGateYaml
       .replaceAll('<JUDGE>', JSON.stringify(judge))
       .replaceAll('<NODE>', JSON.stringify(NODE)));
-    return { dir, portals, profile, calls: join(dir, 'judge-calls.txt') };
+    return { dir, portals, profile, board, calls: join(dir, 'judge-calls.txt') };
   }
 
   function scan(lane) {
@@ -447,7 +509,7 @@ process.stdin.on('data', (d) => { input += d; }).on('end', () => {
       CAREER_OPS_PORTALS: lane.portals,
       CAREER_OPS_PROFILE: lane.profile,
       CAREER_OPS_TIERS: join(lane.dir, 'data', 'no-tiers.tsv'),
-      FIT_GATE_TEST_BOARD: JSON.stringify(BOARD.map(({ title, company, url, location }) => ({ title, company, url, location }))),
+      FIT_GATE_TEST_BOARD: JSON.stringify(lane.board.map(({ title, company, url, location }) => ({ title, company, url, location }))),
       FIT_GATE_TEST_CALLS: lane.calls,
     });
     return execFileSync(NODE, [join(ROOT, 'scan.mjs')], { cwd: lane.dir, env, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -528,6 +590,38 @@ process.stdin.on('data', (d) => { input += d; }).on('end', () => {
       && /New offers added:\s+7/.test(out));
   } catch (err) {
     fail(`end-to-end scan with the SKIP switch off failed: ${err.message}`);
+  }
+
+  // A re-listed seat the gate cut yesterday (ticket 2g): filed, never judged.
+  try {
+    const now = new Date();
+    const today = localToday(now);
+    const yesterday = localToday(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 12));
+    const board = [
+      { title: 'Commercial Associate', company: 'Collectiv Food | Certified B Corp', url: 'https://boards.example.com/fit/21', location: 'London', text: 'PASSME. You will own the discovery and delivery of the squad.' },
+      { title: 'Chief of Staff to the President, International - Fanatics Collectibles', company: 'Fanatics', url: 'https://boards.example.com/fit/22', location: 'London', text: 'PASSME. You will own the discovery and delivery of the squad.' },
+    ];
+    const pipeline = `# Pipeline\n\n## Pending\n\n## Processed\n\n`
+      + `- [x] https://uk.linkedin.com/jobs/view/commercial-associate-at-collectiv-food-certified-b-corp-4470403476 | Collectiv Food / Certified B Corp | Commercial Associate | London Area, United Kingdom | route: standard | skipped (fit: Stated salary of £29k is below the hard floor of £45,000., ${yesterday})\n`
+      + `- [x] https://uk.indeed.com/viewjob?jk=f773d73c6e95041c | Fanatics | Chief of Staff to the President, International | London | route: standard | skipped (fit: Fanatics is far above the ~1,000-staff cut., ${yesterday})\n`;
+    const lane = makeLane(GATE_ON(true), { board, positives: ['Commercial Associate', 'Chief of Staff'], pipeline });
+    const out = scan(lane);
+    const text = readIf(join(lane.dir, 'data', 'pipeline.md'));
+    const calls = readIf(lane.calls).split('\n').filter(Boolean).length;
+    eq('only the longer Fanatics title reached the judge', calls, 1);
+    ok('Collectiv Food is filed in Processed as a repeat of yesterday\'s cut, cells kept',
+      section(text, 'Processed').includes(`- [x] https://boards.example.com/fit/21 | Collectiv Food / Certified B Corp | Commercial Associate | London | jd: `)
+      && section(text, 'Processed').includes(`| route: standard | skipped (fit: SKIP (repeat of ${yesterday}), ${today})`));
+    ok('and never enters Pending, where the judged Fanatics row is', !section(text, 'Pending').includes('Collectiv') && /Fanatics \| Chief of Staff to the President, International - Fanatics Collectibles .*\| fit: PASS/.test(section(text, 'Pending')));
+    ok('the summary line counts the one judged row', out.includes('Fit gate:              assessed 1, PASS 1, SKIP 0, REVIEW 0, failed calls 0, ceiling hits 0, retried 0'));
+    ok('and the repeats line and its row are printed',
+      out.includes('Fit gate repeats:      1 cut by the gate within 14 days, filed again with no call')
+      && out.includes(`FIT REPEAT | Collectiv Food | Certified B Corp | Commercial Associate | cut on ${yesterday}, not judged again`));
+    const sources = readIf(join(lane.dir, 'data', 'scan-sources.tsv')).trim().split('\n').pop().split('\t');
+    ok('the source ledger counts the repeat as a fit drop', sources[5] === '2' && sources[6] === '1' && sources[8] === 'fit=1');
+    ok('and scan-history records its URL as skipped_fit', /https:\/\/boards\.example\.com\/fit\/21\t[^\n]*\tskipped_fit/.test(readIf(join(lane.dir, 'data', 'scan-history.tsv'))));
+  } catch (err) {
+    fail(`end-to-end scan with a re-listed seat failed: ${err.message}`);
   }
 
   // With the gate off: the scan is what it was.
