@@ -86,7 +86,7 @@ import {
   ROUTE_BUCKET_LABELS,
 } from './providers/_role-route.mjs';
 import { extractExperienceClauses } from './providers/_experience-clause.mjs';
-import { readFitGateSettings, buildFitGate, formatFitValue, formatFitSkipReason, formatFitSummary } from './providers/_fit-gate.mjs';
+import { readFitGateSettings, buildFitGate, collectFitCuts, formatFitValue, formatFitSkipReason, formatFitSummary } from './providers/_fit-gate.mjs';
 import { flagValue, hasFlag, validateFlags } from './lib/cli-flags.mjs';
 import { withPortalHealthLock } from './portal-health-lock.mjs';
 import { localToday } from './lib/local-today.mjs';
@@ -4595,7 +4595,12 @@ async function main() {
   // `fit_gate: enabled: true`; with it off nothing below calls a model and the
   // run prints and writes exactly what it did before.
   const fitSettings = readFitGateSettings(PROFILE_PATH, { root: DATA_ROOT });
-  const fitGate = fitSettings.enabled ? buildFitGate(fitSettings, { canonicalize: canonicalizeCompany }) : null;
+  // The gate's own cuts of the last 14 days (ticket 2g): a re-listed seat that
+  // matches one is filed again as a SKIP without a call.
+  const fitPriorCuts = fitSettings.enabled
+    ? collectFitCuts(readIfExists(PIPELINE_PATH), { canonicalize: canonicalizeCompany, today: localToday() })
+    : new Map();
+  const fitGate = fitSettings.enabled ? buildFitGate(fitSettings, { canonicalize: canonicalizeCompany, priorCuts: fitPriorCuts }) : null;
   if (fitGate) {
     console.log(`Fit gate on: ${fitSettings.model}, effort ${fitSettings.effort}, SKIP switch ${fitSettings.skip ? 'on' : 'off'}, at most ${fitSettings.maxRows} rows and ${Math.round(fitSettings.budgetMs / 60_000)} min`);
   }

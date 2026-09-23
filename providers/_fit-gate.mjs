@@ -166,6 +166,76 @@ function oneLine(text) {
   return String(text ?? '').replace(/\s+/g, ' ').trim();
 }
 
+// ── Repeats: a seat the gate already cut is not judged again ────────
+//
+// On 23 September 2026 the 09:00 run paid for a judge call on Collectiv Food's
+// Commercial Associate, which the 17:00 run the day before had already cut on
+// the same advert. The company+title dedup missed it because the queue line
+// writes the board's "Collectiv Food | Certified B Corp" as "Collectiv Food /
+// Certified B Corp". A new row whose company (after company_aliases) and whole
+// title match a line the gate moved to Processed within the window is filed
+// again as a SKIP without a call. Only the gate's own cuts count: a PASS, a
+// REVIEW, a SKIP held in the Inbox, a Planner's tick and a reopened row are
+// all judged again.
+
+/** How far back a gate cut still stands in for a new judgement, in days. */
+export const FIT_REPEAT_WINDOW_DAYS = 14;
+
+/** A queue cell as the scan would write it: escapes undone, `|` as `/`, one line. */
+function cutCell(value) {
+  return oneLine(String(value ?? '').replace(/\\([\\[\]])/g, '$1').replace(/\|/g, '/'));
+}
+
+/**
+ * The key a repeat is matched on: the canonical company and the whole title,
+ * case-insensitive. Never a prefix: "Chief of Staff to the President,
+ * International" and the same title with "- Fanatics Collectibles" after it
+ * are two keys.
+ */
+export function fitCutKey(company, title, canonicalize = (n) => String(n ?? '').trim().toLowerCase()) {
+  return `${canonicalize(cutCell(company))}::${cutCell(title).toLowerCase()}`;
+}
+
+const FIT_CUT_TAIL_RE = /\|\s*skipped \(fit: (.*), (\d{4}-\d{2}-\d{2})\)\s*$/;
+const FIT_REPEAT_REASON_RE = /^SKIP \(repeat of (\d{4}-\d{2}-\d{2})\)$/;
+
+function dayNumber(isoDate) {
+  const ms = Date.parse(`${isoDate}T00:00:00Z`);
+  return Number.isFinite(ms) ? Math.round(ms / 86_400_000) : null;
+}
+
+/**
+ * The gate's cuts still inside the window, read from `data/pipeline.md`:
+ * ticked lines whose last cell is `skipped (fit: <reason>, <date>)`, the shape
+ * the scan writes for a SKIP it moves to Processed. A repeat line carries the
+ * date of the judgement it repeated, so the window runs from the last real
+ * judgement and a seat re-listed every day is judged afresh after it.
+ *
+ * @returns {Map<string, string>} fitCutKey → the latest cut date, YYYY-MM-DD
+ */
+export function collectFitCuts(pipelineText, { canonicalize, today, windowDays = FIT_REPEAT_WINDOW_DAYS } = {}) {
+  const cuts = new Map();
+  const todayN = dayNumber(today);
+  if (todayN == null) return cuts;
+  for (const line of String(pipelineText ?? '').split('\n')) {
+    if (!/^- \[x\]\s+/.test(line)) continue;
+    const tail = line.match(FIT_CUT_TAIL_RE);
+    if (!tail) continue;
+    const cells = line.replace(/^- \[x\]\s+/, '').split('|').map((c) => c.trim());
+    const urlIndex = cells.findIndex((c) => /^https?:\/\//.test(c));
+    if (urlIndex === -1) continue;
+    const company = cells[urlIndex + 1] || '';
+    const title = cells[urlIndex + 2] || '';
+    if (!company || !title) continue;
+    const cutOn = tail[1].match(FIT_REPEAT_REASON_RE)?.[1] || tail[2];
+    const cutN = dayNumber(cutOn);
+    if (cutN == null || todayN - cutN < 0 || todayN - cutN > windowDays) continue;
+    const key = fitCutKey(company, title, canonicalize);
+    if (!cuts.has(key) || cuts.get(key) < cutOn) cuts.set(key, cutOn);
+  }
+  return cuts;
+}
+
 /**
  * The gate for one run.
  *
@@ -175,11 +245,12 @@ function oneLine(text) {
  * @param {string} [options.rulesError] - why the rules could not be loaded
  * @param {(prompt: string, opts: {signal: AbortSignal}) => Promise<{text: string, models?: string[]}>} options.judge
  * @param {(name: string) => string} [options.canonicalize] - the scan's company canonicaliser
+ * @param {Map<string, string>} [options.priorCuts] - from collectFitCuts, built with the same canonicaliser
  * @param {() => number} [options.now]
  */
-export function createFitGate({ settings, rules, rulesError = '', judge, canonicalize = (n) => String(n ?? '').trim().toLowerCase(), now = Date.now }) {
+export function createFitGate({ settings, rules, rulesError = '', judge, canonicalize = (n) => String(n ?? '').trim().toLowerCase(), priorCuts = new Map(), now = Date.now }) {
   const allow = new Set((settings.alwaysAllow || []).map((c) => canonicalize(c)));
-  const tally = { assessed: 0, pass: 0, skip: 0, review: 0, failed: 0, ceilingHits: 0, calls: 0, retried: 0, models: new Map(), rows: [], retries: [] };
+  const tally = { assessed: 0, pass: 0, skip: 0, review: 0, failed: 0, ceilingHits: 0, calls: 0, retried: 0, models: new Map(), rows: [], retries: [], repeats: [] };
   let firstCallAt = null;
   let reserved = 0;
   let active = 0;
@@ -220,6 +291,16 @@ export function createFitGate({ settings, rules, rulesError = '', judge, canonic
    * @param {{company: string, title: string, advert: string, readStatus?: string|null}} row
    */
   async function assess(row) {
+    // A repeat of the gate's own cut, before anything that could spend a call.
+    // Only where a fresh SKIP would leave the Inbox too: with the switch off or
+    // the company under always_allow the row is judged as it always was.
+    if (settings.skip && !allow.has(canonicalize(row.company))) {
+      const cutOn = priorCuts.get(fitCutKey(row.company, row.title, canonicalize));
+      if (cutOn) {
+        tally.repeats.push({ company: row.company || '', title: row.title || '', cutOn });
+        return { verdict: 'SKIP', reason: `SKIP (repeat of ${cutOn})`, excerpt: '', failed: false, ceiling: false, allowed: false, held: false, repeatOf: cutOn };
+      }
+    }
     const advert = String(row.advert ?? '');
     if ((row.readStatus != null && row.readStatus !== 'read') || !advert.trim()) {
       return record(row, review('advert not read, nothing to judge'));
@@ -336,7 +417,7 @@ export function createFitGate({ settings, rules, rulesError = '', judge, canonic
 }
 
 /** The gate the scan runs: the rules loaded from the settings' paths, the call through `claude`. */
-export function buildFitGate(settings, { canonicalize } = {}) {
+export function buildFitGate(settings, { canonicalize, priorCuts } = {}) {
   let rules = null;
   let rulesError = '';
   try {
@@ -345,7 +426,7 @@ export function buildFitGate(settings, { canonicalize } = {}) {
   } catch (err) {
     rulesError = err?.message || String(err);
   }
-  return createFitGate({ settings, rules, rulesError, judge: claudeJudge(settings), canonicalize });
+  return createFitGate({ settings, rules, rulesError, judge: claudeJudge(settings), canonicalize, priorCuts });
 }
 
 // The `fit:` value lives in `_fit-prompt.mjs`, which imports nothing but `fs`,
@@ -362,6 +443,7 @@ export function formatFitSkipReason(reason, date) {
  * with its reason, so a model's verdict is never invisible, and one line per
  * first call that failed and was asked again, so a judge that fails every
  * first call shows up in the run log even when every retry rescues the row.
+ * Last, when there were any, the repeats filed without a call, one line each.
  */
 export function formatFitSummary(gate) {
   const { tally, settings } = gate;
@@ -380,6 +462,14 @@ export function formatFitSummary(gate) {
   for (const retry of tally.retries) {
     const said = retry.sample ? ` | the judge said: "${retry.sample}"` : '';
     lines.push(`FIT RETRY | ${retry.company || '?'} | ${retry.title || '?'} | first call failed: ${retry.reason}${said}`);
+  }
+  // Repeats are not judged, so they sit outside "assessed" and get their own
+  // count, printed only when there is one so a run without any reads as before.
+  if (tally.repeats.length > 0) {
+    lines.push(`Fit gate repeats:      ${tally.repeats.length} cut by the gate within ${FIT_REPEAT_WINDOW_DAYS} days, filed again with no call`);
+    for (const repeat of tally.repeats) {
+      lines.push(`FIT REPEAT | ${repeat.company || '?'} | ${repeat.title || '?'} | cut on ${repeat.cutOn}, not judged again`);
+    }
   }
   return lines;
 }
