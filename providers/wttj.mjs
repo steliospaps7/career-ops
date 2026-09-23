@@ -1,6 +1,7 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
 import { asciiFold } from '../lib/ascii-fold.mjs';
+import { htmlToText } from './_html-to-text.mjs';
 
 // Welcome to the Jungle provider — queries WTTJ's public Algolia search index
 // (the same one the welcometothejungle.com jobs UI calls). The Algolia app id
@@ -220,6 +221,98 @@ export function normalizeWttjHit(h) {
     };
   }
   return job;
+}
+
+// ── The job's own record: the office address and the advert (ticket 6) ──
+//
+// The Algolia index carries each office's city and country but no street
+// address, and on 20 September 2026 the city was wrong: Fluent's New York
+// Business Operations Manager (Partnerships) came back as city "York", country
+// "United Kingdom", under the slug "business-operations-manager-partnerships_
+// york_v6teslps", so slugPlace above had nothing to catch. The job's own record
+// on api.welcometothejungle.com carried `address: "New York, NY"` for the same
+// office. The advert reader fetches that record for each row that survives the
+// free filters, one call per row, and the address rides at the top of the
+// stored advert, so a later run that reuses the file still sees it.
+
+const API_HOST = 'api.welcometothejungle.com';
+/** Starts each line of the stored advert that names an office address. */
+export const OFFICE_ADDRESS_PREFIX = 'Office address: ';
+
+/**
+ * The job's own API record for a WTTJ posting URL, or null when the URL is not
+ * one. The two slugs are held to the same characters normalizeWttjHit allows
+ * before either reaches a fetched URL.
+ * @param {unknown} pageUrl
+ * @returns {string|null}
+ */
+export function wttjApiUrl(pageUrl) {
+  if (typeof pageUrl !== 'string') return null;
+  let u;
+  try {
+    u = new URL(pageUrl.trim());
+  } catch {
+    return null;
+  }
+  if (u.protocol !== 'https:' || u.hostname.toLowerCase() !== 'www.welcometothejungle.com') return null;
+  const m = u.pathname.match(/^\/[a-z]{2}(?:-[a-z]{2})?\/companies\/([a-z0-9_-]+)\/jobs\/([a-z0-9_-]+)\/?$/i);
+  if (!m) return null;
+  return `https://${API_HOST}/api/v1/organizations/${m[1]}/jobs/${m[2]}`;
+}
+
+/**
+ * One line per office: the address when the record has one, and only then the
+ * city and country code, because the city is the field that was wrong.
+ * @param {any} job
+ * @returns {string[]}
+ */
+function officeLines(job) {
+  const list = Array.isArray(job?.offices) && job.offices.length > 0 ? job.offices : (job?.office ? [job.office] : []);
+  const text = (v) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim() : '');
+  const lines = [];
+  for (const o of list) {
+    if (!o || typeof o !== 'object') continue;
+    const line = text(o.address) || [text(o.city), text(o.country_code)].filter(Boolean).join(', ');
+    if (line && !lines.includes(line)) lines.push(line);
+  }
+  return lines;
+}
+
+/**
+ * The advert text from the job's own API record: the office address lines,
+ * then the job description and the profile sought, as the posting page shows
+ * them. '' when the record carries no description or profile, so the reader
+ * moves on to the page rather than storing addresses alone.
+ * @param {any} payload - the API response, `{ job: {...} }`
+ * @param {number} [cap]
+ * @returns {string}
+ */
+export function wttjAdvertText(payload, cap) {
+  const job = payload && typeof payload === 'object' ? (payload.job || payload) : null;
+  if (!job || typeof job !== 'object') return '';
+  const body = [job.description, job.profile]
+    .map((html) => (typeof html === 'string' ? htmlToText(html, cap) : ''))
+    .filter((t) => t.trim())
+    .join('\n\n');
+  if (!body.trim()) return '';
+  const head = officeLines(job).map((line) => `${OFFICE_ADDRESS_PREFIX}${line}`);
+  return head.length > 0 ? `${head.join('\n')}\n\n${body}` : body;
+}
+
+/**
+ * The office addresses at the top of a stored WTTJ advert. Only the leading
+ * block is read, so a sentence in the advert itself is never taken for one.
+ * @param {unknown} text
+ * @returns {string[]}
+ */
+export function wttjOfficeAddresses(text) {
+  const addresses = [];
+  for (const line of String(text ?? '').trimStart().split('\n')) {
+    if (!line.startsWith(OFFICE_ADDRESS_PREFIX)) break;
+    const address = line.slice(OFFICE_ADDRESS_PREFIX.length).trim();
+    if (address) addresses.push(address);
+  }
+  return addresses;
 }
 
 /** Resolve config: queries and/or an Algolia filter expression, + per-query hit cap. */

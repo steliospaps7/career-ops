@@ -23,6 +23,7 @@ import { classifyLiveness } from '../liveness-core.mjs';
 import { resolveAtsApi, isSafeValue } from '../liveness-api.mjs';
 import { htmlToText } from './_html-to-text.mjs';
 import { withStatedCompensation } from './ashby.mjs';
+import { wttjApiUrl, wttjAdvertText } from './wttj.mjs';
 import { providerFetchContext } from './_ip-guard.mjs';
 import { DEFAULT_USER_AGENT } from '../user-agent.mjs';
 
@@ -121,6 +122,12 @@ export function resolveReadRoute(rawUrl) {
         return page;
     }
   }
+
+  // Welcome to the Jungle's posting page carries no office address, and the
+  // board's search index had the city wrong (ticket 6). The job's own record
+  // has both the advert and the address; wttjApiUrl checks both slugs.
+  const wttj = wttjApiUrl(pageUrl);
+  if (wttj) return { kind: 'feed', host: 'wttj', format: 'json', pageUrl, url: wttj };
 
   // Workable is the one host resolveAtsApi does not carry, so its two values get
   // the same isSafeValue check by hand before either reaches a fetched URL.
@@ -237,6 +244,9 @@ export function extractFeedDescription(host, payload, jobId) {
       return htmlToText(payload.content || '', ADVERT_TEXT_CAP);
     case 'workable':
       return htmlToText(payload.description || payload?.job?.description || '', ADVERT_TEXT_CAP);
+    case 'wttj':
+      // The office address lines lead, then the advert (providers/wttj.mjs).
+      return wttjAdvertText(payload, ADVERT_TEXT_CAP);
     default:
       return '';
   }
@@ -495,7 +505,7 @@ function frontmatterField(raw, field) {
  * This is what lets the caller skip the ladder: a stored advert is re-used and
  * never re-fetched for the same URL, so a re-run costs nothing on the boards.
  *
- * @returns {{path:string, status:string|null, rung:string|null}|null}
+ * @returns {{path:string, status:string|null, rung:string|null, failedAs?:string|null}|null}
  */
 export function findAdvert({ company, title, url }, { jdsDir = DEFAULT_JDS_DIR } = {}) {
   const filename = advertFilename(company, title, url);
@@ -522,7 +532,11 @@ export function findAdvert({ company, title, url }, { jdsDir = DEFAULT_JDS_DIR }
 function storedState(raw) {
   const status = frontmatterField(raw, 'read_status');
   if (status === null) return { status: 'read', rung: 'apify', foreign: true };
-  return { status, rung: frontmatterField(raw, 'read_rung') || null, foreign: false };
+  // How the ladder failed, for a file it could not read (ticket 6): `shell`
+  // means a host answered with no advert, `blocked` that none answered. Files
+  // written before 23 September 2026 carry no such line and read as null.
+  const failedAs = status === 'read' ? null : (frontmatterField(raw, 'read_failed_as') || null);
+  return { status, rung: frontmatterField(raw, 'read_rung') || null, foreign: false, failedAs };
 }
 
 /**
@@ -593,7 +607,7 @@ fetched_at: ${yamlEscape(fetchedAt)}
 final_url: ${yamlEscape(record.finalUrl || record.url)}
 read_rung: ${yamlEscape(record.rung || '')}
 read_status: ${yamlEscape(record.status || 'unreadable')}
----
+${record.status !== 'read' && record.failedAs ? `read_failed_as: ${yamlEscape(record.failedAs)}\n` : ''}---
 
 # ${record.title} — ${record.company}
 

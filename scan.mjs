@@ -86,6 +86,7 @@ import {
   ROUTE_BUCKET_LABELS,
 } from './providers/_role-route.mjs';
 import { extractExperienceClauses } from './providers/_experience-clause.mjs';
+import { wttjOfficeAddresses } from './providers/wttj.mjs';
 import { readFitGateSettings, buildFitGate, collectFitCuts, formatFitValue, formatFitSkipReason, formatFitSummary } from './providers/_fit-gate.mjs';
 import { flagValue, hasFlag, validateFlags } from './lib/cli-flags.mjs';
 import { withPortalHealthLock } from './portal-health-lock.mjs';
@@ -595,6 +596,53 @@ export function buildLocationFilter(locationFilter) {
     // never rescue a blocked location — "Program Manager - Remote" in Bengaluru
     // stays rejected. This widens `allow`, never `block`.
     return titleSignalsRemote(title);
+  };
+}
+
+/**
+ * The check a Welcome to the Jungle row gets once its advert is read (ticket 6).
+ *
+ * The board's search index had US offices filed as city "York", country "United
+ * Kingdom", so the free location filter above passed them. The job's own record
+ * carries the office address ("New York, NY"), and the reader puts it at the top
+ * of the stored advert (providers/wttj.mjs). The row is dropped when every
+ * office address names a place the location filter blocks, judged the way the
+ * filter judges one location: `block_hard` always blocks, `always_allow` beats
+ * `block`. So a London office with a second office in Paris stays, and so does
+ * a real York office, which no block entry names. The allow list is not used:
+ * an address need not spell "United Kingdom" to be in it.
+ *
+ * A row with no advert text is dropped too, but only when the reader reached
+ * the record or the page and found no advert there (`failedAs` is `shell`): on
+ * 20 September four New York rows reached the Inbox with an empty stored advert,
+ * and each cost a fit-gate call that could only answer "advert not read, nothing
+ * to judge". A read nobody answered (`blocked`: a network error, a 403, an API
+ * outage) or one whose failure was never recorded keeps the row, labelled and
+ * listed, under the B1 rule: a board that did not answer says nothing about the
+ * posting.
+ *
+ * @param {object} [locationFilter] - portals.yml `location_filter`
+ * @returns {(description: unknown, failedAs?: string|null) => {drop: false, unread?: true} | {drop: true, reason: 'empty'|'location', phrase?: string}}
+ */
+export function buildWttjAdvertCheck(locationFilter) {
+  const alwaysAllow = compileLocationKeywordList(locationFilter?.always_allow);
+  const block = compileLocationKeywordList(locationFilter?.block);
+  const blockHard = compileLocationKeywordList(locationFilter?.block_hard);
+  const blocked = (address) => {
+    const lower = address.toLowerCase();
+    if (blockHard.some((m) => m(lower))) return true;
+    if (alwaysAllow.some((m) => m(lower))) return false;
+    return block.some((m) => m(lower));
+  };
+  return (description, failedAs = null) => {
+    if (typeof description !== 'string' || description.trim() === '') {
+      return failedAs === 'shell' ? { drop: true, reason: 'empty' } : { drop: false, unread: true };
+    }
+    const addresses = wttjOfficeAddresses(description);
+    if (addresses.length > 0 && addresses.every(blocked)) {
+      return { drop: true, reason: 'location', phrase: addresses.join(' · ') };
+    }
+    return { drop: false };
   };
 }
 
@@ -2593,7 +2641,7 @@ export function buildDropExplainer(config = {}, candidateCountry = '') {
 }
 
 /** The drop reasons the gate can return, in the order it tries them. */
-export const ADVERT_DROP_REASONS = ['content', 'years', 'countryEligibility', 'visa', 'location'];
+export const ADVERT_DROP_REASONS = ['content', 'years', 'countryEligibility', 'visa', 'location', 'empty'];
 
 export const ADVERT_DROP_LABELS = {
   content: 'content',
@@ -2601,6 +2649,8 @@ export const ADVERT_DROP_LABELS = {
   countryEligibility: 'eligibility',
   visa: 'visa',
   location: 'location',
+  // A Welcome to the Jungle row whose advert came back empty (ticket 6).
+  empty: 'advert empty',
 };
 
 /**
@@ -3453,7 +3503,7 @@ export function buildAdvertReader({
         tally.byFailure[kind] = (tally.byFailure[kind] || 0) + 1;
         tally.unreadableRows.push({ ...identity, failedAs: existing.status, failedAt: 'stored' });
       }
-      return { status: existing.status, rung: existing.rung, jdPath: existing.path, text, reused: true, reachedFirecrawl };
+      return { status: existing.status, rung: existing.rung, jdPath: existing.path, text, reused: true, reachedFirecrawl, failedAs: existing.failedAs ?? null };
     }
 
     const outcome = await readAdvert(url, t, { firecrawlEnabled });
@@ -3465,6 +3515,7 @@ export function buildAdvertReader({
       finalUrl: outcome.finalUrl,
       fetchedAt: new Date().toISOString(),
       source: 'scan-reader',
+      failedAs: outcome.failedAs || null,
     }, { jdsDir, reread });
 
     if (outcome.reachedFirecrawl) tally.firecrawlResidue++;
@@ -3529,6 +3580,9 @@ export async function fillJobAdvert(job, reader, companyName = '') {
   const outcome = await reader.read(entry);
   if (outcome.jdPath) job.jdPath = outcome.jdPath;
   job.readStatus = outcome.status;
+  // How an unread advert failed: `shell` (a host answered with no advert) or
+  // `blocked` (none answered). Ticket 6 drops only the first kind.
+  job.readFailedAs = outcome.status === 'read' ? null : (outcome.failedAs ?? null);
   if (outcome.status === 'read' && outcome.text) job.description = outcome.text;
   return outcome;
 }
@@ -4172,6 +4226,9 @@ export const SOURCE_DROP_REASONS = [
   // advert. A posting whose own board page says it is gone is dropped rather
   // than passed on with an empty description.
   { key: 'advertExpired', label: 'advert expired' },
+  // A Welcome to the Jungle row whose advert came back empty (ticket 6). Other
+  // boards keep an unread row, labelled and listed.
+  { key: 'advertEmpty', label: 'advert empty' },
   { key: 'content', label: 'content' },
   { key: 'countryEligibility', label: 'country' },
   { key: 'visa', label: 'visa' },
@@ -4863,6 +4920,7 @@ async function main() {
   }
 
   const locationFilter = buildLocationFilter(config.location_filter);
+  const wttjAdvertCheck = buildWttjAdvertCheck(config.location_filter);
   const postingAgeFilter = buildPostingAgeFilter(config.max_posting_age_days);
   const postedDateFilter = buildPostedDateFilter(effectiveAfter, postedBefore);
 
@@ -5025,6 +5083,7 @@ async function main() {
   let totalFilteredPostedDate = 0;
   let totalFilteredSalary = 0;
   let totalFilteredAdvertExpired = 0;
+  let totalFilteredAdvertEmpty = 0;
   let totalFilteredContent = 0;
   let totalFilteredCountryEligibility = 0;
   let totalFilteredBlacklist = 0;
@@ -5187,6 +5246,28 @@ async function main() {
           totalFilteredAdvertExpired++;
           sourceLedger.drop(company.name, 'advertExpired');
           continue;
+        }
+        // ── Welcome to the Jungle: the office address, and an empty advert (ticket 6)
+        if (provider.id === 'wttj') {
+          const wttjVerdict = wttjAdvertCheck(job.description, job.readFailedAs ?? null);
+          if (wttjVerdict.drop) {
+            if (wttjVerdict.reason === 'empty') {
+              totalFilteredAdvertEmpty++;
+              sourceLedger.drop(company.name, 'advertEmpty');
+            } else {
+              totalFilteredLocation++;
+              sourceLedger.drop(company.name, 'location');
+            }
+            countAdvertDrop(advertDrops, {
+              company: job.company || company.name || '',
+              title: job.title,
+              url: job.url,
+              jdPath: job.jdPath || '',
+              reason: wttjVerdict.reason,
+              phrase: wttjVerdict.phrase,
+            });
+            continue;
+          }
         }
         // ── The gate (ticket B2) ─────────────────────────────────
         // One rule, shared with the standalone pass, so the two cannot drift.
@@ -5400,6 +5481,7 @@ async function main() {
     postedDate: totalFilteredPostedDate,
     salary: totalFilteredSalary,
     advertExpired: totalFilteredAdvertExpired,
+    advertEmpty: totalFilteredAdvertEmpty,
     content: totalFilteredContent,
     countryEligibility: totalFilteredCountryEligibility,
     visa: totalFilteredVisa,
