@@ -505,7 +505,7 @@ function frontmatterField(raw, field) {
  * This is what lets the caller skip the ladder: a stored advert is re-used and
  * never re-fetched for the same URL, so a re-run costs nothing on the boards.
  *
- * @returns {{path:string, status:string|null, rung:string|null}|null}
+ * @returns {{path:string, status:string|null, rung:string|null, failedAs?:string|null}|null}
  */
 export function findAdvert({ company, title, url }, { jdsDir = DEFAULT_JDS_DIR } = {}) {
   const filename = advertFilename(company, title, url);
@@ -532,7 +532,11 @@ export function findAdvert({ company, title, url }, { jdsDir = DEFAULT_JDS_DIR }
 function storedState(raw) {
   const status = frontmatterField(raw, 'read_status');
   if (status === null) return { status: 'read', rung: 'apify', foreign: true };
-  return { status, rung: frontmatterField(raw, 'read_rung') || null, foreign: false };
+  // How the ladder failed, for a file it could not read (ticket 6): `shell`
+  // means a host answered with no advert, `blocked` that none answered. Files
+  // written before 23 September 2026 carry no such line and read as null.
+  const failedAs = status === 'read' ? null : (frontmatterField(raw, 'read_failed_as') || null);
+  return { status, rung: frontmatterField(raw, 'read_rung') || null, foreign: false, failedAs };
 }
 
 /**
@@ -603,7 +607,7 @@ fetched_at: ${yamlEscape(fetchedAt)}
 final_url: ${yamlEscape(record.finalUrl || record.url)}
 read_rung: ${yamlEscape(record.rung || '')}
 read_status: ${yamlEscape(record.status || 'unreadable')}
----
+${record.status !== 'read' && record.failedAs ? `read_failed_as: ${yamlEscape(record.failedAs)}\n` : ''}---
 
 # ${record.title} — ${record.company}
 

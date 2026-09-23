@@ -187,12 +187,19 @@ eq('an advert read from the page, with no address lines, is kept', check('Operat
 eq('a filter with no block list drops nothing on the address', buildWttjAdvertCheck(undefined)(wttjAdvertText(record([NEW_YORK_MISLABELLED]))), { drop: false });
 
 // ── Part 2: the empty advert ────────────────────────────────────────
-eq('an empty advert is dropped', check(''), { drop: true, reason: 'empty' });
-eq('whitespace is empty', check('  \n '), { drop: true, reason: 'empty' });
-eq('no description at all is empty', check(undefined), { drop: true, reason: 'empty' });
+// Dropped only when the reader reached the record or the page and found no
+// advert there (`shell`). A read nobody answered (`blocked`), or one whose
+// failure was never recorded, keeps the row unread, under the B1 rule.
+eq('an empty advert the host answered with no text is dropped', check('', 'shell'), { drop: true, reason: 'empty' });
+eq('whitespace is empty', check('  \n ', 'shell'), { drop: true, reason: 'empty' });
+eq('no description at all is empty', check(undefined, 'shell'), { drop: true, reason: 'empty' });
+eq('an empty advert nobody answered is kept unread', check('', 'blocked'), { drop: false, unread: true });
+eq('an empty advert whose failure was never recorded is kept unread', check(''), { drop: false, unread: true });
 {
   // The four rows as they sit in jds/ today: a stored stub, read_status
-  // unreadable, no text. The sweep reuses the stub and the row is dropped.
+  // unreadable, no text, and no record of how the read failed (written before
+  // the reader recorded it). The sweep reuses the stub and keeps the row
+  // unread: nothing says a host answered.
   const jdsDir = tempDir();
   const deadTransports = {
     fetchText: async () => { throw new Error('offline'); },
@@ -205,11 +212,12 @@ eq('no description at all is empty', check(undefined), { drop: true, reason: 'em
     const job = { url, company: r.company, title: r.title, location: 'York, United Kingdom' };
     const outcome = await fillJobAdvert(job, reader, 'Welcome to the Jungle');
     ok(`${r.company}: the stored stub is reused, not fetched`, outcome && outcome.reused === true);
-    eq(`${r.company}: the empty advert drops the row`, check(job.description), { drop: true, reason: 'empty' });
+    eq(`${r.company}: a stub with no recorded failure keeps the row unread`, check(job.description, job.readFailedAs), { drop: false, unread: true });
   }
 }
 {
-  // A fresh read that fails everywhere is empty too, and is dropped.
+  // A record and a page both answering with nothing readable: dropped, and the
+  // stored stub says why, so a later run that reuses it drops it too.
   const jdsDir = tempDir();
   const reader = buildAdvertReader({
     jdsDir,
@@ -220,8 +228,32 @@ eq('no description at all is empty', check(undefined), { drop: true, reason: 'em
   });
   const job = { url: pageUrl(TWENTIETH[1]), company: 'Viam', title: 'Chief of Staff', location: 'York, United Kingdom' };
   const outcome = await fillJobAdvert(job, reader, 'Welcome to the Jungle');
-  eq('a record and a page with no advert read as unreadable', outcome.status, 'unreadable');
-  eq('and the row is dropped as empty', check(job.description), { drop: true, reason: 'empty' });
+  eq('a record and a page both answering with nothing readable read as unreadable, failed as shell', [outcome.status, job.readFailedAs], ['unreadable', 'shell']);
+  eq('a record and a page both answering with nothing readable drops it as empty', check(job.description, job.readFailedAs), { drop: true, reason: 'empty' });
+  ok('the stored stub records the failure', readFileSync(join(jdsDir, outcome.jdPath.split('/').pop()), 'utf-8').includes('read_failed_as: "shell"'));
+  const again = { url: job.url, company: job.company, title: job.title, location: job.location };
+  const reused = await fillJobAdvert(again, reader, 'Welcome to the Jungle');
+  ok('a later run reuses the stub', reused.reused === true);
+  eq('and drops it as empty again', check(again.description, again.readFailedAs), { drop: true, reason: 'empty' });
+}
+{
+  // A record and a page both blocked: nobody answered, so nothing is known about
+  // the posting. The row is kept, labelled and listed.
+  const jdsDir = tempDir();
+  const reader = buildAdvertReader({
+    jdsDir,
+    transports: {
+      fetchText: async () => ({ status: 403, body: '<html><body>Forbidden</body></html>' }),
+      fetchJson: async () => { throw new Error('fetch failed: ECONNRESET'); },
+    },
+  });
+  const job = { url: pageUrl(TWENTIETH[2]), company: 'US Mobile', title: 'Chief of Staff', location: 'York, United Kingdom' };
+  const outcome = await fillJobAdvert(job, reader, 'Welcome to the Jungle');
+  eq('a record and a page both blocked read as unreadable, failed as blocked', [outcome.status, job.readFailedAs], ['unreadable', 'blocked']);
+  eq('a record and a page both blocked keeps the row unread', check(job.description, job.readFailedAs), { drop: false, unread: true });
+  const again = { url: job.url, company: job.company, title: job.title, location: job.location };
+  await fillJobAdvert(again, reader, 'Welcome to the Jungle');
+  eq('and a later run that reuses the stub keeps it too', check(again.description, again.readFailedAs), { drop: false, unread: true });
 }
 
 // ── The source log names the drop ───────────────────────────────────
@@ -262,7 +294,7 @@ eq('no description at all is empty', check(undefined), { drop: true, reason: 'em
   const src = readFileSync(join(ROOT, 'scan.mjs'), 'utf-8');
   const sweep = src.slice(src.indexOf("sourceLedger.drop(company.name, 'advertExpired');"));
   const block = sweep.slice(0, sweep.indexOf('const verdict = advertGate('));
-  ok('the sweep checks the row after the read and before the advert gate', block.includes('wttjAdvertCheck(job.description)'));
+  ok('the sweep checks the row after the read and before the advert gate', block.includes('wttjAdvertCheck(job.description, job.readFailedAs'));
   ok('only for the wttj provider: other boards keep an unread row, labelled and listed', block.includes("provider.id === 'wttj'"));
   ok('an empty advert counts under advertEmpty', block.includes("sourceLedger.drop(company.name, 'advertEmpty')"));
   ok('an address drop counts under location, with the free filter\'s drops', block.includes("sourceLedger.drop(company.name, 'location')"));

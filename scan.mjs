@@ -612,12 +612,17 @@ export function buildLocationFilter(locationFilter) {
  * a real York office, which no block entry names. The allow list is not used:
  * an address need not spell "United Kingdom" to be in it.
  *
- * A row with no advert text is dropped too: on 20 September four New York rows
- * reached the Inbox with an empty stored advert, and each cost a fit-gate call
- * that could only answer "advert not read, nothing to judge".
+ * A row with no advert text is dropped too, but only when the reader reached
+ * the record or the page and found no advert there (`failedAs` is `shell`): on
+ * 20 September four New York rows reached the Inbox with an empty stored advert,
+ * and each cost a fit-gate call that could only answer "advert not read, nothing
+ * to judge". A read nobody answered (`blocked`: a network error, a 403, an API
+ * outage) or one whose failure was never recorded keeps the row, labelled and
+ * listed, under the B1 rule: a board that did not answer says nothing about the
+ * posting.
  *
  * @param {object} [locationFilter] - portals.yml `location_filter`
- * @returns {(description: unknown) => {drop: false} | {drop: true, reason: 'empty'|'location', phrase?: string}}
+ * @returns {(description: unknown, failedAs?: string|null) => {drop: false, unread?: true} | {drop: true, reason: 'empty'|'location', phrase?: string}}
  */
 export function buildWttjAdvertCheck(locationFilter) {
   const alwaysAllow = compileLocationKeywordList(locationFilter?.always_allow);
@@ -629,8 +634,10 @@ export function buildWttjAdvertCheck(locationFilter) {
     if (alwaysAllow.some((m) => m(lower))) return false;
     return block.some((m) => m(lower));
   };
-  return (description) => {
-    if (typeof description !== 'string' || description.trim() === '') return { drop: true, reason: 'empty' };
+  return (description, failedAs = null) => {
+    if (typeof description !== 'string' || description.trim() === '') {
+      return failedAs === 'shell' ? { drop: true, reason: 'empty' } : { drop: false, unread: true };
+    }
     const addresses = wttjOfficeAddresses(description);
     if (addresses.length > 0 && addresses.every(blocked)) {
       return { drop: true, reason: 'location', phrase: addresses.join(' · ') };
@@ -3496,7 +3503,7 @@ export function buildAdvertReader({
         tally.byFailure[kind] = (tally.byFailure[kind] || 0) + 1;
         tally.unreadableRows.push({ ...identity, failedAs: existing.status, failedAt: 'stored' });
       }
-      return { status: existing.status, rung: existing.rung, jdPath: existing.path, text, reused: true, reachedFirecrawl };
+      return { status: existing.status, rung: existing.rung, jdPath: existing.path, text, reused: true, reachedFirecrawl, failedAs: existing.failedAs ?? null };
     }
 
     const outcome = await readAdvert(url, t, { firecrawlEnabled });
@@ -3508,6 +3515,7 @@ export function buildAdvertReader({
       finalUrl: outcome.finalUrl,
       fetchedAt: new Date().toISOString(),
       source: 'scan-reader',
+      failedAs: outcome.failedAs || null,
     }, { jdsDir, reread });
 
     if (outcome.reachedFirecrawl) tally.firecrawlResidue++;
@@ -3572,6 +3580,9 @@ export async function fillJobAdvert(job, reader, companyName = '') {
   const outcome = await reader.read(entry);
   if (outcome.jdPath) job.jdPath = outcome.jdPath;
   job.readStatus = outcome.status;
+  // How an unread advert failed: `shell` (a host answered with no advert) or
+  // `blocked` (none answered). Ticket 6 drops only the first kind.
+  job.readFailedAs = outcome.status === 'read' ? null : (outcome.failedAs ?? null);
   if (outcome.status === 'read' && outcome.text) job.description = outcome.text;
   return outcome;
 }
@@ -5238,7 +5249,7 @@ async function main() {
         }
         // ── Welcome to the Jungle: the office address, and an empty advert (ticket 6)
         if (provider.id === 'wttj') {
-          const wttjVerdict = wttjAdvertCheck(job.description);
+          const wttjVerdict = wttjAdvertCheck(job.description, job.readFailedAs ?? null);
           if (wttjVerdict.drop) {
             if (wttjVerdict.reason === 'empty') {
               totalFilteredAdvertEmpty++;
