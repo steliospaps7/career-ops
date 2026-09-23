@@ -22,6 +22,7 @@ import { join } from 'path';
 import { classifyLiveness } from '../liveness-core.mjs';
 import { resolveAtsApi, isSafeValue } from '../liveness-api.mjs';
 import { htmlToText } from './_html-to-text.mjs';
+import { withStatedCompensation } from './ashby.mjs';
 import { providerFetchContext } from './_ip-guard.mjs';
 import { DEFAULT_USER_AGENT } from '../user-agent.mjs';
 
@@ -227,7 +228,8 @@ export function extractFeedDescription(host, payload, jobId) {
       const jobs = Array.isArray(payload?.jobs) ? payload.jobs : [];
       const job = jobs.find((j) => String(j?.id) === String(jobId));
       if (!job) return '';
-      return htmlToText(job.descriptionPlain || job.descriptionHtml || job.description || '', ADVERT_TEXT_CAP);
+      // The band Ashby states in its compensation field rides as the last line.
+      return withStatedCompensation(htmlToText(job.descriptionPlain || job.descriptionHtml || job.description || '', ADVERT_TEXT_CAP), job);
     }
     case 'lever':
       return htmlToText(payload.descriptionPlain || payload.description || '', ADVERT_TEXT_CAP);
