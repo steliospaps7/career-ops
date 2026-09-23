@@ -18,6 +18,8 @@ import {
   argValue,
   toolNames,
   KNOWN_KINDS,
+  EVALUATE_MODEL,
+  EVALUATE_EFFORT,
 } from "../../src/lib/claude-invocation.mjs";
 
 test("toolScopeFor: pdf gets no write-capable tool at all", () => {
@@ -216,6 +218,28 @@ test("claudeCliArgs: evaluate still ships write access", () => {
 
   // Then its argv keeps write access — so removing it is a deliberate act
   assert.equal(grantsWriteCapability({ allowed, disallowed: "" }), true);
+});
+
+test("claudeCliArgs: the scorer names its model and effort", () => {
+  // Given an evaluation, the run that puts a score on a row
+  const args = claudeCliArgs({ kind: "evaluate", prompt: "x" });
+
+  // Then the model is written on the command line rather than inherited from
+  // whatever the user's CLI defaults to, so two runs of one advert are
+  // comparable
+  assert.equal(argValue(args, "--model"), EVALUATE_MODEL);
+  assert.equal(argValue(args, "--effort"), EVALUATE_EFFORT);
+  assert.equal(EVALUATE_MODEL, "claude-opus-5-5");
+  assert.equal(EVALUATE_EFFORT, "medium");
+});
+
+test("claudeCliArgs: the kinds that score nothing name no model", () => {
+  // Given the kinds that produce no score
+  for (const kind of KNOWN_KINDS.filter((k) => k !== "evaluate")) {
+    // Then their model is left to the CLI: pinning it would be a cost decision
+    // nobody asked for
+    assert.equal(argValue(claudeCliArgs({ kind, prompt: "x" }), "--model"), "");
+  }
 });
 
 test("argValue: absent or dangling flags yield an empty string, not a crash", () => {

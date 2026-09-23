@@ -122,6 +122,22 @@ export function grantsWriteCapability(scope) {
 }
 
 /**
+ * The model and thinking effort an evaluate run is pinned to.
+ *
+ * Without these flags the worker inherited whatever model the user's `claude`
+ * happened to default to, so the same advert could be scored by two different
+ * models on two days and neither score said which. The scan's own fit gate has
+ * been pinned since ticket D2a (config/profile.yml `fit_gate`); the dashboard's
+ * score button was the one scorer still unpinned. Stelios asked for Opus 5.5 at
+ * medium on 23 September 2026, which is what the gate runs.
+ *
+ * Only `evaluate` is pinned. `pdf` and `research` do not score anything, so
+ * fixing their model here would be a cost decision nobody has asked for.
+ */
+export const EVALUATE_MODEL = "claude-opus-5-5";
+export const EVALUATE_EFFORT = "medium";
+
+/**
  * The complete headless `claude` argv for a run.
  *
  * Assembled here, not in the route, so a guard can assert on the command line
@@ -146,6 +162,8 @@ export function claudeCliArgs({ kind, prompt }) {
     // optional Canva server) from loading on evaluate/research runs. The same gap
     // for the other kinds is #2507.
     ...(kind === "pdf" ? ["--strict-mcp-config"] : []),
+    // The scorer names its model; see EVALUATE_MODEL.
+    ...(kind === "evaluate" ? ["--model", EVALUATE_MODEL, "--effort", EVALUATE_EFFORT] : []),
     "--allowedTools", scope.allowed,
     "--disallowedTools", scope.disallowed,
   ];
