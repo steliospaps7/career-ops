@@ -8,7 +8,7 @@ import path from "node:path";
 import { resolveCli } from "@/lib/clis";
 import { accumulateTokens, hasNewCompletedReport, isFatalGenericStderr, killMsForKind, timeoutMessage } from "@/lib/run-cli-support.mjs";
 import { spawnHeadlessCli } from "@/lib/spawn-cli.mjs";
-import { careerOpsRoot, readMemory, findReportFile, readInbox, readScanDates, readLanguageConfig } from "@/lib/career-ops";
+import { careerOpsRoot, readMemory, findReportFile, readInbox, readScanDates, readLanguageConfig, readAdvertFacts } from "@/lib/career-ops";
 import { resolvePdfPaths, type PdfPaths } from "@/lib/pdf-paths.mjs";
 import { renderAndMarkPdf, writeCvHtml, pdfRunOutcome } from "@/lib/pdf-render.mjs";
 import { createCvEnvelopeFilter, type CvEnvelope } from "@/lib/cv-envelope.mjs";
@@ -107,11 +107,16 @@ export async function POST(req: Request) {
   // explicit that a guessed date is worse than an absent one (the POSTED column
   // renders absent as `—`, a wrong date as a fresh req). Unknown URL → undefined
   // → the prompt writes no segment at all.
-  const postedAt =
-    kind === "evaluate"
-      ? readInbox().find((j) => j.url === input)?.postedAt ?? readScanDates().get(input)
-      : undefined;
-  const prompt = buildPrompt({ kind, input, memory: readMemory(), today, postedAt, lang });
+  //
+  // The same row also carries the advert the SCAN already saved (`jd:`), and
+  // its company resolves to the employer's own careers page. Both are read here
+  // for the same reason the date is: the server has them, so the prompt states
+  // them instead of sending the worker to fetch an aggregator page that answers
+  // a headless read with a login wall (ticket 2e, Fred Perry, 22 September).
+  const inboxRow = kind === "evaluate" ? readInbox().find((j) => j.url === input) : undefined;
+  const postedAt = kind === "evaluate" ? inboxRow?.postedAt ?? readScanDates().get(input) : undefined;
+  const advert = kind === "evaluate" ? readAdvertFacts(inboxRow) : undefined;
+  const prompt = buildPrompt({ kind, input, memory: readMemory(), today, postedAt, lang, advert });
 
   const isClaude = cliId === "claude";
   // Which tools each kind gets, and the whole claude argv, live in

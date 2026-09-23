@@ -52,3 +52,23 @@ test("a row the gate never judged shows nothing, and parses as before", () => {
   assert.equal(job.postedAt, "2026-09-01");
   assert.equal(parseInboxLine("## Pending"), null);
 });
+
+test("the jd: segment reaches the job as the saved advert (ticket 2e)", () => {
+  // The real Fred Perry row, 22 September 2026: an Indeed URL whose advert the
+  // scan had already saved. The reader dropped `jd:` on the floor, so the
+  // evaluate prompt could not name the file and the run died on Indeed's wall.
+  const line =
+    "- [ ] https://uk.indeed.com/viewjob?jk=1505caa519d66118 | Fred Perry | Product Manager - Menswear | London WC1X 0AA | jd: local:jds/fred-perry-product-manager-menswear-eea864f490.md | route: review | fit: REVIEW (the seat is a stretch) | note: local:jds/fred-perry-product-manager-menswear-eea864f490.md";
+  const job = parseInboxLine(line);
+
+  assert.equal(job.jd, "local:jds/fred-perry-product-manager-menswear-eea864f490.md");
+  // ...and the positional cells are untouched by the extra label
+  assert.equal(job.company, "Fred Perry");
+  assert.equal(job.role, "Product Manager - Menswear");
+  assert.equal(job.location, "London WC1X 0AA");
+});
+
+test("a row with no jd: segment has no saved advert", () => {
+  const job = parseInboxLine("- [ ] https://jobs.example.com/1 | Acme | Analyst | London");
+  assert.equal(job.jd, undefined);
+});

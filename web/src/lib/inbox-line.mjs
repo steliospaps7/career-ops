@@ -18,8 +18,9 @@ const LABELED_SEGMENT = /^([a-z][a-z_-]*):\s*(.*)$/i;
  *  Positional split for the first columns (the optional 4th `location` #1015
  *  and 5th `compensation` #1017 must NOT bleed into `role`); labeled segments
  *  (posted:/trust:/note:/…) are filtered out of positional assignment wherever
- *  they appear and surfaced when useful (posted: → postedAt, and the fit
- *  judgement's fit: and route:, ticket D2b). Unknown labels and further
+ *  they appear and surfaced when useful (posted: → postedAt, the fit
+ *  judgement's fit: and route:, ticket D2b, and jd: → the saved advert).
+ *  Unknown labels and further
  *  trailing columns are ignored gracefully. Returns null for a line that is not
  *  a job. */
 export function parseInboxLine(line) {
@@ -49,6 +50,10 @@ export function parseInboxLine(line) {
     // the fit judgement's verdict and the route it set (ticket D2b)
     fit: labels.get("fit") || undefined,
     route: labels.get("route") || undefined,
+    // where the scanner saved the advert text, e.g. `local:jds/acme-pm-1a2b.md`
+    // (modes/pipeline.md's `local:` prefix). Surfaced raw; the caller decides
+    // whether the reference is one it will read.
+    jd: labels.get("jd") || undefined,
   };
 }
 
