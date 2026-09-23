@@ -3983,6 +3983,53 @@ export function appendScanSources(records, timestamp, filePath = SCAN_SOURCES_PA
   appendFileSync(filePath, lines, 'utf-8');
 }
 
+/**
+ * Each source's most recent row in the per-source log, keyed by source name.
+ * Per source, not the log's last run: a one-board hand run, or a run that
+ * failed before it reached the paid feeds, writes no row for them, and must
+ * not reset their count.
+ *
+ * @param {string} [filePath]
+ * @returns {Map<string, {paid: boolean, status: string, found: number}>} empty when there is no log
+ */
+export function readLastRunSources(filePath = SCAN_SOURCES_PATH) {
+  const rows = new Map();
+  if (!existsSync(filePath)) return rows;
+  const lines = readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const cols = lines[i].split('\t');
+    if (cols[0] === 'timestamp' || rows.has(cols[1])) continue;
+    rows.set(cols[1], { paid: cols[3] === 'paid', status: cols[4], found: Number(cols[5]) });
+  }
+  return rows;
+}
+
+/**
+ * One warning per paid feed that found nothing on this run and on its last
+ * appearance in the log. A paid feed can go quiet for days while its reader
+ * reports success (Indeed, 19 to 21 September 2026), and one empty run is
+ * normal, so it takes two. A run that errored also found nothing; the line
+ * then names the status of each run, so a timeout reads differently from a
+ * feed that answered with nothing.
+ *
+ * @param {Array<object>} records - from ledger.records()
+ * @param {Map<string, {paid: boolean, status: string, found: number}>} previous - from readLastRunSources
+ * @returns {string[]}
+ */
+export function emptyPaidFeedWarnings(records, previous) {
+  const lines = [];
+  for (const r of records) {
+    if (!r.paid || r.found !== 0) continue;
+    const before = previous.get(sanitizeTsvField(r.name));
+    if (!before || !before.paid || before.found !== 0) continue;
+    const statuses = r.status === 'empty' && before.status === 'empty'
+      ? ''
+      : ` (last run ${before.status}, this run ${r.status})`;
+    lines.push(`WARNING: ${r.name} empty two runs running${statuses}`);
+  }
+  return lines;
+}
+
 // ── Portal health persistence (#1744) ───────────────────────────────
 
 // Anchored to the data root (#3510), read by stats.mjs:39 at the same anchor.
@@ -5178,6 +5225,10 @@ async function main() {
   }
   if (emptyTargets.length > 0) {
     console.log(`🟡 ${emptyTargets.length} target(s) live but empty: ${emptyTargets.join(', ')}`);
+  }
+  // Read before this run's rows are appended below, so each feed's last row is from a previous run.
+  for (const line of emptyPaidFeedWarnings(sourceLedger.records(), readLastRunSources(sourceLogPath))) {
+    console.log(line);
   }
   if (newlyDeadNetwork.length > 0) {
     console.log(`\nNetwork errors (${newlyDeadNetwork.length}):`);
