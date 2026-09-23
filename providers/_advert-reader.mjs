@@ -23,6 +23,7 @@ import { classifyLiveness } from '../liveness-core.mjs';
 import { resolveAtsApi, isSafeValue } from '../liveness-api.mjs';
 import { htmlToText } from './_html-to-text.mjs';
 import { withStatedCompensation } from './ashby.mjs';
+import { wttjApiUrl, wttjAdvertText } from './wttj.mjs';
 import { providerFetchContext } from './_ip-guard.mjs';
 import { DEFAULT_USER_AGENT } from '../user-agent.mjs';
 
@@ -121,6 +122,12 @@ export function resolveReadRoute(rawUrl) {
         return page;
     }
   }
+
+  // Welcome to the Jungle's posting page carries no office address, and the
+  // board's search index had the city wrong (ticket 6). The job's own record
+  // has both the advert and the address; wttjApiUrl checks both slugs.
+  const wttj = wttjApiUrl(pageUrl);
+  if (wttj) return { kind: 'feed', host: 'wttj', format: 'json', pageUrl, url: wttj };
 
   // Workable is the one host resolveAtsApi does not carry, so its two values get
   // the same isSafeValue check by hand before either reaches a fetched URL.
@@ -237,6 +244,9 @@ export function extractFeedDescription(host, payload, jobId) {
       return htmlToText(payload.content || '', ADVERT_TEXT_CAP);
     case 'workable':
       return htmlToText(payload.description || payload?.job?.description || '', ADVERT_TEXT_CAP);
+    case 'wttj':
+      // The office address lines lead, then the advert (providers/wttj.mjs).
+      return wttjAdvertText(payload, ADVERT_TEXT_CAP);
     default:
       return '';
   }

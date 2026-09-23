@@ -71,6 +71,8 @@ const {
     // The advert reader runs here, between the free filters and the three that
     // read the advert, and drops a posting whose own board page says it is gone.
     'advertExpired',
+    // Ticket 6: a Welcome to the Jungle row whose advert came back empty.
+    'advertEmpty',
     'content', 'countryEligibility', 'visa', 'duplicate', 'cooldown',
     // The fit judgement (ticket D2b) runs last in the sweep.
     'fit',
