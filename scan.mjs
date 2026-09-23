@@ -3983,6 +3983,47 @@ export function appendScanSources(records, timestamp, filePath = SCAN_SOURCES_PA
   appendFileSync(filePath, lines, 'utf-8');
 }
 
+/**
+ * The previous run's rows in the per-source log, keyed by source name. The
+ * last run is the block of rows carrying the file's last timestamp.
+ *
+ * @param {string} [filePath]
+ * @returns {Map<string, {paid: boolean, found: number}>} empty when there is no log
+ */
+export function readLastRunSources(filePath = SCAN_SOURCES_PATH) {
+  const rows = new Map();
+  if (!existsSync(filePath)) return rows;
+  const lines = readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
+  let last = null;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const cols = lines[i].split('\t');
+    if (cols[0] === 'timestamp') break;
+    if (last === null) last = cols[0];
+    if (cols[0] !== last) break;
+    rows.set(cols[1], { paid: cols[3] === 'paid', found: Number(cols[5]) });
+  }
+  return rows;
+}
+
+/**
+ * One warning per paid feed that found nothing on this run and on the last.
+ * A paid feed can go quiet for days while its reader reports success (Indeed,
+ * 19 to 21 September 2026), and one empty run is normal, so it takes two.
+ *
+ * @param {Array<object>} records - from ledger.records()
+ * @param {Map<string, {paid: boolean, found: number}>} previous - from readLastRunSources
+ * @returns {string[]}
+ */
+export function emptyPaidFeedWarnings(records, previous) {
+  return records
+    .filter((r) => r.paid && r.found === 0)
+    .filter((r) => {
+      const before = previous.get(sanitizeTsvField(r.name));
+      return before && before.paid && before.found === 0;
+    })
+    .map((r) => `WARNING: ${r.name} empty two runs running`);
+}
+
 // ── Portal health persistence (#1744) ───────────────────────────────
 
 // Anchored to the data root (#3510), read by stats.mjs:39 at the same anchor.
@@ -5178,6 +5219,10 @@ async function main() {
   }
   if (emptyTargets.length > 0) {
     console.log(`🟡 ${emptyTargets.length} target(s) live but empty: ${emptyTargets.join(', ')}`);
+  }
+  // Read before this run's rows are appended below, so "the last run" is the previous one.
+  for (const line of emptyPaidFeedWarnings(sourceLedger.records(), readLastRunSources(sourceLogPath))) {
+    console.log(line);
   }
   if (newlyDeadNetwork.length > 0) {
     console.log(`\nNetwork errors (${newlyDeadNetwork.length}):`);
