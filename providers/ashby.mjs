@@ -78,6 +78,39 @@ export function parseCompensation(job) {
   };
 }
 
+/**
+ * The salary band the board states in its compensation field, as one line of
+ * advert text, or '' when the board states none.
+ *
+ * Ashby keeps the band outside the description, so a reader of the advert
+ * text alone never sees it: the fit gate's pay rule needs a written sentence
+ * to quote. Only `scrapeableCompensationSalarySummary` is used, the salary
+ * alone ("£140K - £180K"), never the tier summary with equity and commission
+ * folded in. A band the employer hides from the posting page is not stated.
+ * @param {any} job - Ashby job object
+ * @returns {string}
+ */
+export function statedCompensationLine(job) {
+  const comp = job?.compensation;
+  if (!comp || job?.shouldDisplayCompensationOnJobPostings === false) return '';
+  const band = comp.scrapeableCompensationSalarySummary;
+  if (typeof band !== 'string' || !band.trim()) return '';
+  return `Compensation (stated on the job board): ${band.trim()}`;
+}
+
+/**
+ * The advert text with the stated band as its last line. An empty advert stays
+ * empty, so a row with no body still goes to the advert reader.
+ * @param {string} text
+ * @param {any} job - Ashby job object
+ * @returns {string}
+ */
+export function withStatedCompensation(text, job) {
+  const line = statedCompensationLine(job);
+  if (!line || !text || !text.trim()) return text;
+  return `${text.replace(/\s+$/, '')}\n\n${line}`;
+}
+
 const ALLOWED_ASHBY_HOSTS = new Set(['api.ashbyhq.com']);
 
 /** @param {string} url */
@@ -101,7 +134,12 @@ function resolveApiUrl(entry) {
   // Ashby posting-api board (mirrors greenhouse's api: precedence).
   if (entry.api) {
     assertAshbyUrl(entry.api);
-    return entry.api;
+    // A pinned api: written without `includeCompensation` gets it added: the
+    // board's pay band is only in the payload when the flag is on, and
+    // the band line (statedCompensationLine) needs it there.
+    const pinned = new URL(entry.api);
+    if (!pinned.searchParams.has('includeCompensation')) pinned.searchParams.set('includeCompensation', 'true');
+    return pinned.href;
   }
   const url = entry.careers_url || '';
   const match = url.match(/jobs\.ashbyhq\.com\/([^/?#]+)/);
@@ -214,8 +252,9 @@ export default {
       location: formatLocation(j),
       // Ashby's posting-api list ships `descriptionPlain` for free (same
       // payload, no per-job request) — mirrors lever. Enables scan.mjs's
-      // content_filter / visa_filter.
-      description: typeof j.descriptionPlain === 'string' ? j.descriptionPlain : '',
+      // content_filter / visa_filter. A band stated in the compensation
+      // field is appended as the last line, so the fit gate can quote it.
+      description: typeof j.descriptionPlain === 'string' ? withStatedCompensation(j.descriptionPlain, j) : '',
       salary: parseCompensation(j),
       postedAt: toEpochMs(j.publishedAt),
     }));
