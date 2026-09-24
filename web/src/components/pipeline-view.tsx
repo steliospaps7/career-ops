@@ -212,7 +212,7 @@ export function PipelineView({
       {tab === "INBOX" ? (
         /* ── Inbox: the triage surface (Abundance → Triage → Shortlist → Score) ── */
         pendingInbox.length > 0 ? (
-          <InboxTriage inbox={pendingInbox} hidden={hidden} setHidden={setHidden} />
+          <InboxTriage inbox={pendingInbox} tracked={inbox.filter((j) => j.tracked)} hidden={hidden} setHidden={setHidden} />
         ) : (
           <InboxEmpty count={0} filtered={false} />
         )

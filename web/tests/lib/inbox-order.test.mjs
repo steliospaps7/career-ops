@@ -12,9 +12,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { parseInboxLine } from "../../src/lib/inbox-line.mjs";
-import { parseApplications } from "../../src/lib/tracker-table.mjs";
 import { markTrackedInbox } from "../../src/lib/inbox-tracked.mjs";
 import { orderInboxByScan, compareScannedAt, countNotHidden, parseHiddenList, restoreCount } from "../../src/lib/inbox-order.mjs";
+import { readInboxSummary, readScanDates, countInbox } from "../../src/lib/inbox-summary.mjs";
 
 // Lines from data/pipeline.md on 15 September 2026, in file order; the long fit
 // reasons are cut short. Darktrace came from the 14 September run, Wolters Kluwer
@@ -157,33 +157,40 @@ test("X: a stored hidden list that is not an array of strings reads as empty", (
   assert.equal(countNotHidden([{ url: "https://a.example/1" }], parseHiddenList('{"x":1}')), 1);
 });
 
-// The evaluation over the live files. Read only; skipped when the data is absent.
+// The evaluation over the live files, through inbox-summary.mjs: the one
+// composition the page, the Explore add and `node inbox-summary.mjs` use, so
+// this checks what the page shows, not a copy. Read only; skipped when the data
+// is absent.
 const LIVE = process.env.CAREER_OPS_ROOT?.trim();
 const liveReady = !!LIVE && fs.existsSync(path.join(LIVE, "data/pipeline.md")) && fs.existsSync(path.join(LIVE, "data/scan-history.tsv"));
 
-test("live data: newest scan first, pending count unchanged, X lowers the count by one", { skip: !liveReady && "CAREER_OPS_ROOT not set" }, () => {
-  const read = (rel) => fs.readFileSync(path.join(LIVE, rel), "utf8");
-  // readScanDates, the same rule: earliest first_seen per url
-  const dates = new Map();
-  for (const line of read("data/scan-history.tsv").split("\n").slice(1)) {
-    const [url, firstSeen] = line.split("\t");
-    if (url && /^\d{4}-\d{2}-\d{2}$/.test(firstSeen || "") && !dates.has(url)) dates.set(url, firstSeen);
-  }
-  const lines = read("data/pipeline.md").split("\n").filter((l) => parseInboxLine(l));
-  const applications = fs.existsSync(path.join(LIVE, "data/applications.md")) ? parseApplications(read("data/applications.md"), LIVE) : [];
-  // PipelineView's pending list: not done, one row per URL
-  const pendingOf = (rows) => {
-    const seen = new Set();
-    return rows.filter((j) => !j.done && !seen.has(j.url) && seen.add(j.url));
-  };
-  const before = pendingOf(markTrackedInbox(inbox(lines, dates), applications));
-  const after = pendingOf(markTrackedInbox(orderInboxByScan(inbox(lines, dates), dates), applications));
+test("live data: newest scan first, later line first within a day, pending count unchanged, X lowers the count by one", { skip: !liveReady && "CAREER_OPS_ROOT not set" }, () => {
+  const { jobs, applications, inbox: composed } = readInboxSummary(LIVE);
+  const dates = readScanDates(LIVE);
+  const after = countInbox(jobs, composed).shown;
+  // the same rows unordered, deduped as PipelineView did before the order: first pending line per URL
+  const seen = new Set();
+  const before = markTrackedInbox(jobs, applications).filter((j) => !j.done && !seen.has(j.url) && seen.add(j.url));
+  // each shown row's pipeline.md line: the first unticked line for its URL
+  const lineOf = new Map();
+  jobs.forEach((j, i) => { if (!j.done && !lineOf.has(j.url)) lineOf.set(j.url, i); });
 
   console.log(`live: pending before ${before.length}, after ${after.length}`);
-  for (const [i, j] of after.slice(0, 8).entries()) console.log(`live: ${i + 1}. ${j.scannedAt ?? "-"} ${j.company} (posted ${j.postedAt ?? "-"})`);
+  for (const [i, j] of after.slice(0, 8).entries()) console.log(`live: ${i + 1}. ${j.scannedAt ?? "-"} line ${lineOf.get(j.url) + 1} ${j.company} (posted ${j.postedAt ?? "-"})`);
 
   assert.equal(after.length, before.length);
-  for (let i = 1; i < after.length; i++) assert.ok(compareScannedAt(after[i - 1], after[i]) <= 0, `row ${i + 1} is newer than row ${i}`);
+  assert.equal(dates.size > 0, true, "scan-history.tsv read");
+  let sameDay = 0;
+  for (let i = 1; i < after.length; i++) {
+    assert.ok(compareScannedAt(after[i - 1], after[i]) <= 0, `row ${i + 1} is newer than row ${i}`);
+    // within one date the later pipeline.md line sits above the earlier one:
+    // first_seen has no time, so this is what puts a 17:00 row above a 09:00 row
+    if ((after[i - 1].scannedAt ?? "") === (after[i].scannedAt ?? "")) {
+      sameDay++;
+      assert.ok(lineOf.get(after[i - 1].url) > lineOf.get(after[i].url), `rows ${i} and ${i + 1} share ${after[i].scannedAt ?? "no date"} but the earlier line is on top`);
+    }
+  }
+  console.log(`live: ${sameDay} same-day neighbours, each with the later line on top`);
   const evening = after.slice(0, EVENING.length).map((j) => j.company);
   // the 15 September check holds only until a later run or a tick changes the head
   const stillPending = EVENING.filter((c) => after.some((j) => j.company === c && j.scannedAt === "2026-09-15"));

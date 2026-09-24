@@ -21,6 +21,11 @@
  * A view over the files: nothing here writes, so no lock is needed and the line
  * is still ticked by the next recheck.
  *
+ * A row hidden here says why: it carries `tracked`, the tracker row that holds
+ * the seat (its number, status and date), whatever that status is. The Inbox
+ * lists those rows under "N already in the tracker", and the Explore add says
+ * which row kept a new line out. The first tracker row with the key wins.
+ *
  * Plain .mjs so the rule is testable with `node --test` and no build step.
  */
 import { normalizeTextKey } from "./core/normalize-text-key.mjs";
@@ -37,13 +42,18 @@ function key(company, role) {
 /**
  * @template {{company: string, role: string, done: boolean}} T
  * @param {T[]} inbox
- * @param {{company: string, role: string}[]} applications
- * @returns {T[]} the same rows, with `done: true` on any row the tracker holds
+ * @param {{company: string, role: string, n?: string, status?: string, date?: string}[]} applications
+ * @returns {(T & {tracked?: {n: string, status: string, date: string}})[]} the same rows,
+ *   with `done: true` and `tracked` on any row the tracker holds
  */
 export function markTrackedInbox(inbox, applications) {
-  const tracked = new Set(applications.map((a) => key(a.company, a.role)).filter(Boolean));
+  const tracked = new Map();
+  for (const a of applications) {
+    const k = key(a.company, a.role);
+    if (k && !tracked.has(k)) tracked.set(k, { n: a.n ?? "", status: a.status ?? "", date: a.date ?? "" });
+  }
   return inbox.map((j) => {
     const k = key(j.company, j.role);
-    return j.done || !k || !tracked.has(k) ? j : { ...j, done: true };
+    return j.done || !k || !tracked.has(k) ? j : { ...j, done: true, tracked: tracked.get(k) };
   });
 }

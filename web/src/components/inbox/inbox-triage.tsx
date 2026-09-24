@@ -25,10 +25,14 @@ const BATCH = 20;
 // this list agree; the list lives in this browser only (see pipeline-view.tsx).
 export function InboxTriage({
   inbox,
+  tracked = [],
   hidden,
   setHidden,
 }: {
   inbox: InboxJob[];
+  /** Rows left out because the tracker already holds the seat, each with its
+   *  tracker row (inbox-tracked.mjs). Listed so a row never vanishes unexplained. */
+  tracked?: InboxJob[];
   hidden: string[];
   setHidden: Dispatch<SetStateAction<string[]>>;
 }) {
@@ -220,6 +224,20 @@ export function InboxTriage({
           </button>
         )}
       </div>
+
+      {tracked.length > 0 && (
+        <details className="mt-2 text-xs text-faint">
+          <summary className="cursor-pointer transition-colors hover:text-foreground">{tracked.length} already in the tracker</summary>
+          <ul className="mt-1.5 space-y-1 pl-4">
+            {tracked.map((j) => (
+              <li key={j.url}>
+                <span className="text-muted">{j.company}</span> · {j.role} — tracker row {j.tracked?.n}, {j.tracked?.status || "no status"}
+                {j.tracked?.date ? `, ${j.tracked.date}` : ""}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
 
       {/* multi-select action bar */}
       {selected.size > 0 && (
