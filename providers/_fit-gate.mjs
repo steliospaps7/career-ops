@@ -30,7 +30,7 @@
  */
 
 import { spawn } from 'child_process';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, statSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import * as yaml from 'js-yaml';
@@ -228,11 +228,14 @@ function dayNumber(isoDate) {
  * date of the judgement it repeated, so the window runs from the last real
  * judgement and a seat re-listed every day is judged afresh after it.
  *
- * With `rulesChanged` set, a cut dated before that day is not read: it was made
- * under rules that no longer stand, so the seat is judged again. A cut dated
- * on the day itself counts as made under the new rules, since the rules are
- * changed before that day's next run. For a repeat line the date compared is
- * the judgement it repeated, the same date the window uses.
+ * With `rulesChanged` set, a cut dated on or before that day is not read: it
+ * may have been made under rules that no longer stand, so the seat is judged
+ * again. A cut on the day itself is judged again too, because the rules can
+ * change after that day's first run (the brief of 23 September 2026 changed
+ * at 13:08 BST, after the 09:00 run); a same-day cut made after the change
+ * costs one extra call, a wrong cut left standing costs 14 days. For a repeat
+ * line the date compared is the judgement it repeated, the same date the
+ * window uses.
  *
  * @returns {Map<string, string>} fitCutKey → the latest cut date, YYYY-MM-DD
  */
@@ -254,7 +257,7 @@ export function collectFitCuts(pipelineText, { canonicalize, today, windowDays =
     const cutOn = tail[1].match(FIT_REPEAT_REASON_RE)?.[1] || tail[2];
     const cutN = dayNumber(cutOn);
     if (cutN == null || todayN - cutN < 0 || todayN - cutN > windowDays) continue;
-    if (changedN != null && cutN < changedN) continue;
+    if (changedN != null && cutN <= changedN) continue;
     const key = fitCutKey(company, title, canonicalize);
     if (!cuts.has(key) || cuts.get(key) < cutOn) cuts.set(key, cutOn);
   }
@@ -495,6 +498,27 @@ export function formatFitSummary(gate) {
     lines.push(`Fit gate repeats:      ${tally.repeats.length} cut by the gate within ${FIT_REPEAT_WINDOW_DAYS} days${since}, filed again with no call`);
     for (const repeat of tally.repeats) {
       lines.push(`FIT REPEAT | ${repeat.company || '?'} | ${repeat.title || '?'} | cut on ${repeat.cutOn}, not judged again`);
+    }
+  }
+  lines.push(...rulesChangedWarnings(settings));
+  return lines;
+}
+
+/**
+ * One warning per rule file changed on a later day than
+ * `fit_gate.rules_changed`, so a date left behind after an edit shows in the
+ * run log. The day is the file's modification time in local time, as the
+ * scan dates its cuts. Nothing when the key is absent or a file is missing.
+ */
+export function rulesChangedWarnings(settings) {
+  if (!settings?.rulesChanged) return [];
+  const lines = [];
+  for (const file of [settings.briefPath, settings.criteriaPath]) {
+    if (!file || !existsSync(file)) continue;
+    const m = statSync(file).mtime;
+    const day = `${m.getFullYear()}-${String(m.getMonth() + 1).padStart(2, '0')}-${String(m.getDate()).padStart(2, '0')}`;
+    if (day > settings.rulesChanged) {
+      lines.push(`WARNING: ${file} changed ${day}, after fit_gate.rules_changed ${settings.rulesChanged}`);
     }
   }
   return lines;

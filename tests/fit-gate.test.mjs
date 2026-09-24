@@ -18,7 +18,7 @@
  * Run: node test-all.mjs --only fit-gate
  */
 
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, utimesSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execFileSync } from 'child_process';
@@ -171,9 +171,8 @@ async function suite() {
 
   // ── Repeats and fit_gate.rules_changed: a cut under the old rules is judged again ──
   {
-    // The rules changed 23 September 2026. A cut on the day of the change
-    // counts as made under the new rules, since the rules are changed before
-    // that day's next run.
+    // The rules changed 23 September 2026. A cut on the day of the change is
+    // judged again too: the rules can change after that day's first run.
     const CUTS = [
       '- [x] https://jobs.example.com/before | Before Ltd | Growth Manager | skipped (fit: below the floor, 2026-09-22)',
       '- [x] https://jobs.example.com/on | On Ltd | Growth Manager | skipped (fit: below the floor, 2026-09-23)',
@@ -192,11 +191,26 @@ async function suite() {
     const chained = await gate.assess(row({ company: 'Chained Ltd', title: 'Growth Manager' }));
     ok('a repeat line is compared by the judgement it repeated, before the change: judged', !chained.repeatOf && calls === 2);
     const on = await gate.assess(row({ company: 'On Ltd', title: 'Growth Manager' }));
-    ok('a cut on the day the rules changed is a repeat', on.repeatOf === '2026-09-23' && calls === 2);
+    ok('a cut on the day the rules changed is judged again: one call', !on.repeatOf && calls === 3);
     const after = await gate.assess(row({ company: 'After Ltd', title: 'Growth Manager' }));
-    ok('a cut after the rules changed is a repeat', after.repeatOf === '2026-09-24' && calls === 2);
+    ok('a cut after the rules changed is a repeat', after.repeatOf === '2026-09-24' && calls === 3);
     ok('the repeats line names the cutoff',
-      formatFitSummary(gate).includes('Fit gate repeats:      2 cut by the gate within 14 days, since the rules changed 2026-09-23, filed again with no call'));
+      formatFitSummary(gate).includes('Fit gate repeats:      1 cut by the gate within 14 days, since the rules changed 2026-09-23, filed again with no call'));
+
+    // A rule file edited on a later day than rules_changed is named in the summary.
+    const dir = tempDir();
+    const brief = join(dir, '_brief.md');
+    writeFileSync(brief, 'rules');
+    utimesSync(brief, new Date(2026, 8, 25, 13, 8), new Date(2026, 8, 25, 13, 8));
+    const criteria = join(dir, 'criteria.md');
+    writeFileSync(criteria, 'rules');
+    utimesSync(criteria, new Date(2026, 8, 23, 13, 8), new Date(2026, 8, 23, 13, 8));
+    const watched = createFitGate({ settings: { ...SETTINGS, rulesChanged: '2026-09-23', briefPath: brief, criteriaPath: criteria }, rules: RULES, judge });
+    const warned = formatFitSummary(watched).filter((l) => l.startsWith('WARNING:'));
+    eq('a brief changed after rules_changed is warned about, a criteria file changed on the day is not',
+      JSON.stringify(warned), JSON.stringify([`WARNING: ${brief} changed 2026-09-25, after fit_gate.rules_changed 2026-09-23`]));
+    const unwatched = createFitGate({ settings: { ...SETTINGS, briefPath: brief, criteriaPath: criteria }, rules: RULES, judge });
+    ok('with no rules_changed no warning is printed', !formatFitSummary(unwatched).some((l) => l.startsWith('WARNING:')));
 
     const noDate = collectFitCuts(CUTS, { canonicalize, today });
     eq('with no date every cut in the window stands, as before', [...noDate.values()].sort().join(' '), '2026-09-22 2026-09-22 2026-09-23 2026-09-24');
