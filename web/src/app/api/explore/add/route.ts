@@ -24,6 +24,8 @@ export async function POST(req: NextRequest) {
   // "added" means the line was written, not that the Inbox shows it: the Inbox
   // hides a line whose seat the tracker already holds. So each offer also gets
   // its fate from the same composition the Inbox page uses: shown, or why not.
+  // A failed write sends no fates, so the card shows the write error instead.
+  if (result.error) return Response.json(result);
   const { inbox } = readInboxSummary(careerOpsRoot());
   const fates = offers.filter((o) => o && typeof o.url === "string").map((o) => inboxFate(inbox, o.url));
   return Response.json({ ...result, fates });

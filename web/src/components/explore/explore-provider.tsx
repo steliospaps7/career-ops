@@ -357,9 +357,14 @@ export function ExploreProvider({ children }: { children: React.ReactNode }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ offers: fresh }),
       });
-      const d = (await r.json()) as { added?: number; fates?: { url: string; shown: boolean; reason?: string }[] };
-      if (Array.isArray(d.fates)) {
-        const fates = d.fates;
+      const d = (await r.json()) as { added?: number; error?: string; fates?: { url: string; shown: boolean; reason?: string }[] };
+      // A failed write comes back with an error and no fates: the card says so.
+      const fates = Array.isArray(d.fates)
+        ? d.fates
+        : d.error
+          ? fresh.map((o) => ({ url: o.url, shown: false, reason: `the write failed: ${d.error}` }))
+          : [];
+      if (fates.length) {
         setAddFates((f) => ({ ...f, ...Object.fromEntries(fates.map((x) => [x.url, { shown: x.shown, reason: x.reason }])) }));
       }
       if (d.added && d.added > 0) {
