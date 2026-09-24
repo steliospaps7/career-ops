@@ -336,3 +336,115 @@ const DATE_MAP = { ...BASE_MAP, posted_at: ['postedAt', 'datePosted'] };
     fail(`invalid posted_at: error=${error?.message} requests=${requests}`);
   }
 }
+
+// ── A run that finishes while the wait clock runs out ───────────────────────
+//
+// The wait deadline is wall-clock time, so it can pass while the Mac sleeps
+// with the run already finished on Apify's side. runActor reads the status once
+// more after the deadline: a finished run is kept, one still going is reported
+// with its status.
+
+const { runActor } = await import(pathToFileURL(join(ROOT, 'plugins', 'apify', '_apify.mjs')).href);
+const WAIT_MS = 400;
+
+// `lastRead(res)` answers every status read made after the deadline; every read
+// before it says RUNNING.
+async function runPastDeadline(lastRead) {
+  const prevFetch = globalThis.fetch;
+  const calls = [];
+  // Set before runActor sets its own, so every read runActor makes after its
+  // deadline is also past this one.
+  const deadline = Date.now() + WAIT_MS;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    calls.push(u);
+    const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (u.endsWith('/runs')) return json({ data: { id: 'run1' } });
+    if (u.endsWith('/actor-runs/run1')) return Date.now() >= deadline ? lastRead(json) : json({ data: { status: 'RUNNING' } });
+    if (u.endsWith('/actor-runs/run1/dataset/items')) return json([{ title: 'Late item' }]);
+    return new Response('', { status: 200 });
+  };
+  try {
+    return { items: await runActor('fixture/actor', {}, { timeoutMs: WAIT_MS, token: 'test-token' }), calls };
+  } catch (error) {
+    return { error, calls };
+  } finally {
+    await sleep(20); // let the fire-and-forget abort land before the stub goes
+    globalThis.fetch = prevFetch;
+  }
+}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+{
+  const { items, error, calls } = await runPastDeadline((json) => json({ data: { status: 'SUCCEEDED' } }));
+  const aborted = calls.some(u => u.endsWith('/abort'));
+  if (!error && JSON.stringify(items) === JSON.stringify([{ title: 'Late item' }]) && !aborted) {
+    pass('a run RUNNING until the deadline and SUCCEEDED on the last read returns its items');
+  } else {
+    fail(`late SUCCEEDED run: error=${error?.message} items=${JSON.stringify(items)} aborted=${aborted}`);
+  }
+}
+
+{
+  const { error, calls } = await runPastDeadline((json) => json({ data: { status: 'RUNNING' } }));
+  const aborted = calls.some(u => u.endsWith('/actor-runs/run1/abort'));
+  if (/^Apify run run1 did not finish within 0s \(status RUNNING\)$/.test(error?.message || '') && aborted) {
+    pass('a run still RUNNING on the last read throws with its status and is aborted');
+  } else {
+    fail(`still-running run: error=${error?.message} aborted=${aborted}`);
+  }
+}
+
+{
+  const { error } = await runPastDeadline(() => new Response('run not found', { status: 404 }));
+  if (error?.status === 404 && /^HTTP 404: run not found$/.test(error.message)) {
+    pass('a 4xx on the last read throws the HTTP error, as a 4xx on any poll does');
+  } else {
+    fail(`4xx on last read: error=${error?.message}`);
+  }
+}
+
+{
+  // The last read itself fails without a status: the line says so.
+  const { error } = await runPastDeadline(() => new Response('upstream down', { status: 503 }));
+  if (/^Apify run run1 did not finish within 0s \(status RUNNING, last error: HTTP 503: upstream down\)$/.test(error?.message || '')) {
+    pass('a failed last read keeps the last status seen and names the error');
+  } else {
+    fail(`failed last read: error=${error?.message}`);
+  }
+}
+
+{
+  // SUCCEEDED arrives with under a second left and the dataset takes longer
+  // than that to answer: the read still gets its own time and the items come back.
+  const prevFetch = globalThis.fetch;
+  const DATASET_DELAY_MS = 600;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (u.endsWith('/runs')) return json({ data: { id: 'run1' } });
+    if (u.endsWith('/actor-runs/run1')) return json({ data: { status: 'SUCCEEDED' } });
+    if (u.endsWith('/actor-runs/run1/dataset/items')) {
+      // Honour the abort signal, as a real fetch does.
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, DATASET_DELAY_MS);
+        init.signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('This operation was aborted')); });
+      });
+      return json([{ title: 'Near-deadline item' }]);
+    }
+    return new Response('', { status: 200 });
+  };
+  let items, error;
+  try {
+    items = await runActor('fixture/actor', {}, { timeoutMs: WAIT_MS, token: 'test-token' });
+  } catch (err) {
+    error = err;
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  if (!error && JSON.stringify(items) === JSON.stringify([{ title: 'Near-deadline item' }])) {
+    pass('a run SUCCEEDED with under a second left still gets time to read its dataset');
+  } else {
+    fail(`near-deadline SUCCEEDED run: error=${error?.message} items=${JSON.stringify(items)}`);
+  }
+}

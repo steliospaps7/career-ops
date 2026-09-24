@@ -23,6 +23,8 @@ const POLL_INTERVAL_MS = 3_000;
 const PER_REQUEST_TIMEOUT_MS = 15_000;
 const CONNECT_RETRY_ATTEMPTS = 3;
 const TERMINAL_STATUSES = new Set(['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT']);
+// Time allowed for the dataset read of a run found finished after the deadline.
+const LATE_DATASET_READ_MS = 60_000;
 
 export function hasToken(token = process.env.APIFY_TOKEN) {
   return Boolean(token);
@@ -143,6 +145,7 @@ async function abortRun(runId, token) {
 async function waitForRun(runId, token, deadline, timeoutMs) {
   const url = `${APIFY_API_BASE}/actor-runs/${runId}`;
   let lastError;
+  let lastStatus;
   while (Date.now() < deadline) {
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) break;
@@ -154,6 +157,7 @@ async function waitForRun(runId, token, deadline, timeoutMs) {
       );
       const run = body?.data;
       if (run && TERMINAL_STATUSES.has(run.status)) return run;
+      lastStatus = run?.status;
       lastError = undefined;
     } catch (err) {
       // 4xx (401/403 auth revoked, 404 run not found) won't succeed on retry.
@@ -163,10 +167,23 @@ async function waitForRun(runId, token, deadline, timeoutMs) {
     const sleepMs = Math.min(POLL_INTERVAL_MS, deadline - Date.now());
     if (sleepMs > 0) await sleep(sleepMs);
   }
+  // The deadline is wall-clock time, so it can pass while the Mac sleeps and
+  // every poll is cut off, with the run already finished on Apify's side. Read
+  // the status once more, with its own timeout, before giving up on it.
+  try {
+    const body = await fetchJsonOnce(url, { headers: authHeaders(token) }, PER_REQUEST_TIMEOUT_MS);
+    const run = body?.data;
+    if (run && TERMINAL_STATUSES.has(run.status)) return run;
+    lastStatus = run?.status;
+  } catch (err) {
+    if (err?.status >= 400 && err.status < 500) throw err;
+    lastError = err;
+  }
   // Fire-and-forget cleanup; don't add abortRun's 5s to our wall-clock budget.
   void abortRun(runId, token).catch(() => {});
-  const suffix = lastError ? ` (last error: ${lastError.message})` : '';
-  throw new Error(`Apify run ${runId} did not finish within ${Math.round(timeoutMs / 1000)}s${suffix}`);
+  const status = lastStatus ? `status ${lastStatus}` : 'status unknown';
+  const suffix = lastError ? `, last error: ${lastError.message}` : '';
+  throw new Error(`Apify run ${runId} did not finish within ${Math.round(timeoutMs / 1000)}s (${status}${suffix})`);
 }
 
 async function fetchDatasetItems(runId, token, deadline = null) {
@@ -198,5 +215,9 @@ export async function runActor(actorId, input, { timeoutMs = DEFAULT_RUN_TIMEOUT
     const reason = run.statusMessage ? `: ${run.statusMessage}` : '';
     throw new Error(`Apify actor ${actorId} finished with status ${run.status}${reason}`);
   }
-  return await fetchDatasetItems(runId, token, deadline);
+  // The dataset read always gets at least LATE_DATASET_READ_MS: a run found
+  // finished near or after the deadline would otherwise be lost, since
+  // fetchJson refuses to send anything once the deadline has passed.
+  const datasetDeadline = Math.max(deadline, Date.now() + LATE_DATASET_READ_MS);
+  return await fetchDatasetItems(runId, token, datasetDeadline);
 }

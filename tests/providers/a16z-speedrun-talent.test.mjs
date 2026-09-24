@@ -472,6 +472,32 @@ try {
   }
 
   {
+    // A failed page is named in the error, with the pages the board reported
+    // and the seconds its attempts took.
+    let calls = 0;
+    const page = (n) => ({ jobs: Array.from({ length: 50 }, (_, i) => ({ title: `Role ${n}-${i}`, url: `https://speedrun-talent-network.com/jobs/${n}-${i}` })), total_pages: 55 });
+    const abortCtx = {
+      sleep: async () => {},
+      fetchJson: async () => {
+        calls += 1;
+        if (calls <= 2) return page(calls);
+        const err = new Error('This operation was aborted');
+        err.name = 'AbortError';
+        throw err;
+      },
+    };
+    let message = '';
+    let attempts;
+    let name;
+    try { await provider.fetch({ max_pages: 55 }, abortCtx); } catch (e) { message = String(e?.message); attempts = e?.attempts; name = e?.name; }
+    if (/^a16z-speedrun-talent: page 3 of 55 failed after \d+s, 3 attempts: This operation was aborted$/.test(message) && attempts === 3 && name === 'AbortError') {
+      pass('a page that fails every attempt is named in the error, with its seconds, attempts and the original error name');
+    } else {
+      fail(`failed-page error line = ${JSON.stringify(message)} attempts=${attempts} name=${name}`);
+    }
+  }
+
+  {
     // A non-retryable 4xx must fail fast — retrying a bad request burns time.
     let attempts = 0;
     const badReqCtx = {
