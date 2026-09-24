@@ -352,12 +352,14 @@ const WAIT_MS = 400;
 async function runPastDeadline(lastRead) {
   const prevFetch = globalThis.fetch;
   const calls = [];
-  let deadline;
+  // Set before runActor sets its own, so every read runActor makes after its
+  // deadline is also past this one.
+  const deadline = Date.now() + WAIT_MS;
   globalThis.fetch = async (url) => {
     const u = String(url);
     calls.push(u);
     const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
-    if (u.endsWith('/runs')) { deadline = Date.now() + WAIT_MS; return json({ data: { id: 'run1' } }); }
+    if (u.endsWith('/runs')) return json({ data: { id: 'run1' } });
     if (u.endsWith('/actor-runs/run1')) return Date.now() >= deadline ? lastRead(json) : json({ data: { status: 'RUNNING' } });
     if (u.endsWith('/actor-runs/run1/dataset/items')) return json([{ title: 'Late item' }]);
     return new Response('', { status: 200 });
