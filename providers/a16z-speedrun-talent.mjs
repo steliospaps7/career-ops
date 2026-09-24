@@ -155,6 +155,7 @@ export default {
     const q = resolveQuery(entry);
     const fallbackCompany = entry?.name;
     const out = [];
+    let totalPages = null;
 
     for (let page = 0; page < maxPages; page++) {
       const params = new URLSearchParams({ page: String(page), source: 'career-ops' });
@@ -166,7 +167,21 @@ export default {
       // to abort the whole provider and return NOTHING. Retries are bounded
       // and, once exhausted, the error still propagates — a silent partial
       // board would be worse than an loud empty one (#2506).
-      const json = await fetchJsonWithRetry(ctx, url, { redirect: 'error' });
+      // The error names the page and the seconds its attempts took, so a
+      // failure can be traced to one page of the sweep.
+      const pageStart = Date.now();
+      let json;
+      try {
+        json = await fetchJsonWithRetry(ctx, url, { redirect: 'error' });
+      } catch (err) {
+        const seconds = Math.round((Date.now() - pageStart) / 1000);
+        const of = totalPages ? ` of ${totalPages}` : '';
+        const attempts = Number.isInteger(err?.attempts) ? `, ${err.attempts} attempt${err.attempts === 1 ? '' : 's'}` : '';
+        const wrapped = new Error(`a16z-speedrun-talent: page ${page + 1}${of} failed after ${seconds}s${attempts}: ${err?.message ?? err}`, { cause: err });
+        if (err?.status !== undefined) wrapped.status = err.status;
+        if (err?.attempts !== undefined) wrapped.attempts = err.attempts;
+        throw wrapped;
+      }
       if (!json || !Array.isArray(json.jobs)) {
         throw new Error(
           `a16z-speedrun-talent: unexpected API response on page ${page} — expected { jobs: [...] }, got keys: [${json ? Object.keys(json).join(', ') : 'null'}]`,
@@ -194,6 +209,7 @@ export default {
       //      reordering the two checks) is what fixes #2547: a 49-row page
       //      fails the total_pages test and would still break out on the
       //      next line.
+      if (Number.isInteger(json.total_pages) && json.total_pages > 0) totalPages = json.total_pages;
       if (json.jobs.length === 0) break;
       if (Number.isInteger(json.total_pages) && json.total_pages > 0) {
         if (page + 1 >= json.total_pages) break;
