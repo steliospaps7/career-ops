@@ -40,9 +40,26 @@ const INTERVAL_MULTIPLIERS = {
  */
 export function parseCompensation(job) {
   const comp = job?.compensation;
-  if (!comp) return null;
+  // A band the employer hides from the posting page is not stated (the same
+  // rule as statedCompensationLine).
+  if (!comp || job?.shouldDisplayCompensationOnJobPostings === false) return null;
 
-  const interval = /** @type {keyof typeof INTERVAL_MULTIPLIERS} */ (comp.interval || '1 YEAR');
+  // The posting-api keeps the numbers one level down, one component per
+  // compensationType (Salary, EquityCashValue, ...), in summaryComponents and
+  // in each of compensationTiers[].components. Only the Salary component is
+  // read, never equity. summaryComponents spans every tier, so a record with
+  // several tiers takes the first tier's salary instead. A board that still
+  // sends minValue/maxValue at the top level falls back to that shape.
+  /** @param {any} list */
+  const salaryOf = (list) => (Array.isArray(list) ? list.find((c) => c?.compensationType === 'Salary') : null);
+  const tiers = Array.isArray(comp.compensationTiers) ? comp.compensationTiers : [];
+  const firstTier = tiers[0]?.components;
+  const salaryComponent = tiers.length > 1
+    ? salaryOf(firstTier) || salaryOf(comp.summaryComponents)
+    : salaryOf(comp.summaryComponents) || salaryOf(firstTier);
+  const source = salaryComponent || comp;
+
+  const interval = /** @type {keyof typeof INTERVAL_MULTIPLIERS} */ (source.interval || '1 YEAR');
   const multiplier = INTERVAL_MULTIPLIERS[interval];
   if (!multiplier) return null;
 
@@ -54,9 +71,10 @@ export function parseCompensation(job) {
     const n = Number(v);
     return Number.isFinite(n) && n >= 0 ? n : null;
   };
-  const minValue = normalizeNum(comp.minValue);
-  const maxValue = normalizeNum(comp.maxValue);
-  const currency = typeof comp.currency === 'string' ? comp.currency.trim() : '';
+  const minValue = normalizeNum(source.minValue);
+  const maxValue = normalizeNum(source.maxValue);
+  const rawCurrency = source.currencyCode ?? source.currency;
+  const currency = typeof rawCurrency === 'string' ? rawCurrency.trim() : '';
 
   // If neither min nor max is provided, no valid compensation
   if (minValue == null && maxValue == null) return null;
