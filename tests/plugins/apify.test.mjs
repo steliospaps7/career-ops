@@ -348,10 +348,11 @@ const { runActor } = await import(pathToFileURL(join(ROOT, 'plugins', 'apify', '
 const WAIT_MS = 400;
 
 // `lastRead(res)` answers every status read made after the deadline; every read
-// before it says RUNNING.
+// before it says RUNNING. `lateReads` counts the status reads made after it.
 async function runPastDeadline(lastRead) {
   const prevFetch = globalThis.fetch;
   const calls = [];
+  let lateReads = 0;
   // Set before runActor sets its own, so every read runActor makes after its
   // deadline is also past this one.
   const deadline = Date.now() + WAIT_MS;
@@ -360,14 +361,18 @@ async function runPastDeadline(lastRead) {
     calls.push(u);
     const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
     if (u.endsWith('/runs')) return json({ data: { id: 'run1' } });
-    if (u.endsWith('/actor-runs/run1')) return Date.now() >= deadline ? lastRead(json) : json({ data: { status: 'RUNNING' } });
+    if (u.endsWith('/actor-runs/run1')) {
+      if (Date.now() < deadline) return json({ data: { status: 'RUNNING' } });
+      lateReads++;
+      return lastRead(json);
+    }
     if (u.endsWith('/actor-runs/run1/dataset/items')) return json([{ title: 'Late item' }]);
     return new Response('', { status: 200 });
   };
   try {
-    return { items: await runActor('fixture/actor', {}, { timeoutMs: WAIT_MS, token: 'test-token' }), calls };
+    return { items: await runActor('fixture/actor', {}, { timeoutMs: WAIT_MS, token: 'test-token' }), calls, lateReads };
   } catch (error) {
-    return { error, calls };
+    return { error, calls, lateReads };
   } finally {
     await sleep(20); // let the fire-and-forget abort land before the stub goes
     globalThis.fetch = prevFetch;
@@ -376,10 +381,25 @@ async function runPastDeadline(lastRead) {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 {
-  const { items, error, calls } = await runPastDeadline((json) => json({ data: { status: 'SUCCEEDED' } }));
+  // The Mac sleeps through the last status read: the clock jumps two minutes
+  // before it answers SUCCEEDED. A dataset window counted from the old
+  // deadline (deadline + 60 s) is already over; one counted from now is not.
+  const realNow = Date.now;
+  let slept = 0;
+  Date.now = () => realNow() + slept;
+  let result;
+  try {
+    result = await runPastDeadline((json) => {
+      slept = 120_000;
+      return json({ data: { status: 'SUCCEEDED' } });
+    });
+  } finally {
+    Date.now = realNow;
+  }
+  const { items, error, calls } = result;
   const aborted = calls.some(u => u.endsWith('/abort'));
   if (!error && JSON.stringify(items) === JSON.stringify([{ title: 'Late item' }]) && !aborted) {
-    pass('a run RUNNING until the deadline and SUCCEEDED on the last read returns its items');
+    pass('a run RUNNING until the deadline and SUCCEEDED on a last read two minutes late returns its items');
   } else {
     fail(`late SUCCEEDED run: error=${error?.message} items=${JSON.stringify(items)} aborted=${aborted}`);
   }
@@ -387,11 +407,11 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 {
   const { error, calls } = await runPastDeadline((json) => json({ data: { status: 'RUNNING' } }));
-  const aborted = calls.some(u => u.endsWith('/actor-runs/run1/abort'));
-  if (/^Apify run run1 did not finish within 0s \(status RUNNING\)$/.test(error?.message || '') && aborted) {
-    pass('a run still RUNNING on the last read throws with its status and is aborted');
+  const aborts = calls.filter(u => u.endsWith('/actor-runs/run1/abort')).length;
+  if (/^Apify run run1 did not finish within 0s \(status RUNNING\)$/.test(error?.message || '') && aborts === 1) {
+    pass('a run still RUNNING on the last read throws with its status and is aborted once');
   } else {
-    fail(`still-running run: error=${error?.message} aborted=${aborted}`);
+    fail(`still-running run: error=${error?.message} aborts=${aborts} (expected 1)`);
   }
 }
 
@@ -406,11 +426,12 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 {
   // The last read itself fails without a status: the line says so.
-  const { error } = await runPastDeadline(() => new Response('upstream down', { status: 503 }));
-  if (/^Apify run run1 did not finish within 0s \(status RUNNING, last error: HTTP 503: upstream down\)$/.test(error?.message || '')) {
-    pass('a failed last read keeps the last status seen and names the error');
+  // It is read once, never retried, so a dead API cannot stall the scan.
+  const { error, lateReads } = await runPastDeadline(() => new Response('upstream down', { status: 503 }));
+  if (/^Apify run run1 did not finish within 0s \(status RUNNING, last error: HTTP 503: upstream down\)$/.test(error?.message || '') && lateReads === 1) {
+    pass('a failed last read is made once, keeps the last status seen and names the error');
   } else {
-    fail(`failed last read: error=${error?.message}`);
+    fail(`failed last read: error=${error?.message} reads after the deadline=${lateReads} (expected 1)`);
   }
 }
 

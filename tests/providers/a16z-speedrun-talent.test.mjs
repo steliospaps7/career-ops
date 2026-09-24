@@ -410,14 +410,17 @@ try {
       fetchJson: async () => {
         attempts += 1;
         const err = new Error('HTTP 503 Service Unavailable');
+        err.name = 'HttpError';
         err.status = 503;
         throw err;
       },
     };
-    let persistentThrew = false;
-    try { await provider.fetch({}, deadCtx); } catch { persistentThrew = true; }
-    if (persistentThrew && attempts === 3) pass('fetch() gives up loudly after 3 bounded attempts, never a silent partial (#2506)');
-    else fail(`persistent failure handling wrong: threw=${persistentThrew}, attempts=${attempts}`);
+    let persistentError = null;
+    try { await provider.fetch({}, deadCtx); } catch (err) { persistentError = err; }
+    if (persistentError && attempts === 3) pass('fetch() gives up loudly after 3 bounded attempts, never a silent partial (#2506)');
+    else fail(`persistent failure handling wrong: threw=${Boolean(persistentError)}, attempts=${attempts}`);
+    if (persistentError?.status === 503 && persistentError?.name === 'HttpError') pass('the page error keeps the HTTP status and the error name');
+    else fail(`page error lost its fields: status=${persistentError?.status}, name=${persistentError?.name}`);
   }
 
   {
