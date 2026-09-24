@@ -40,7 +40,9 @@ const INTERVAL_MULTIPLIERS = {
  */
 export function parseCompensation(job) {
   const comp = job?.compensation;
-  if (!comp) return null;
+  // A band the employer hides from the posting page is not stated (the same
+  // rule as statedCompensationLine).
+  if (!comp || job?.shouldDisplayCompensationOnJobPostings === false) return null;
 
   // The posting-api keeps the numbers one level down, one component per
   // compensationType (Salary, EquityCashValue, ...), in summaryComponents and

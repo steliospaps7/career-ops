@@ -68,6 +68,10 @@ twoTiers.compensation.summaryComponents[0].maxValue = 250000;
 if (same(parseCompensation(twoTiers), { min: 140000, max: 180000, currency: 'GBP' })) pass('a record with two tiers takes the first tier\'s salary, not the span');
 else fail(`two-tier record = ${JSON.stringify(parseCompensation(twoTiers))}`);
 
+// ── A hidden band ──
+if (parseCompensation({ ...JOB, shouldDisplayCompensationOnJobPostings: false }) === null) pass('a band the employer hides from the posting page gives null');
+else fail('a hidden band gave a salary');
+
 // ── The old top-level shape ──
 const legacy = parseCompensation({ compensation: { interval: '1 YEAR', minValue: 90000, maxValue: 120000, currency: 'usd' } });
 if (same(legacy, { min: 90000, max: 120000, currency: 'USD' })) pass('a record with the old top-level shape still parses');
