@@ -7,10 +7,8 @@ import { parseApplications } from "@/lib/tracker-table.mjs";
 // One definition of the `{n}-RESERVED.md` convention, shared with
 // run-cli-support.mjs — see report-files.mjs for why it lives there.
 import { isReservedReportFile } from "@/lib/report-files.mjs";
-import { parseInboxLine } from "@/lib/inbox-line.mjs";
 import { readAdvertFacts as advertFacts, type AdvertFacts } from "@/lib/advert-facts.mjs";
-import { markTrackedInbox } from "@/lib/inbox-tracked.mjs";
-import { orderInboxByScan } from "@/lib/inbox-order.mjs";
+import { parseInbox, readScanDates as readScanDatesAt, readInboxSummary } from "@/lib/inbox-summary.mjs";
 import { resolvePdfIndexPath } from "@/lib/core/pdf-index";
 // Pure parser, no I/O — shared with the apply flow's CV resolver so the two
 // don't drift into two different definitions of "which report does this
@@ -76,45 +74,18 @@ function read(rel: string): string | null {
   }
 }
 
-export type InboxJob = { url: string; company: string; role: string; location?: string; compensation?: string; done: boolean; postedAt?: string; scannedAt?: string; fit?: string; route?: string; jd?: string };
+export type InboxJob = { url: string; company: string; role: string; location?: string; compensation?: string; done: boolean; postedAt?: string; scannedAt?: string; fit?: string; route?: string; jd?: string; tracked?: { n: string; status: string; date: string } };
 
 /** Parse data/pipeline.md into inbox jobs. The per-line rule, labeled segments
  *  included, lives in lib/inbox-line.mjs so it can be tested without a build. */
 export function readInbox(): InboxJob[] {
-  const md = read("data/pipeline.md");
-  if (!md) return [];
-  const jobs: InboxJob[] = [];
-  for (const line of md.split("\n")) {
-    const job = parseInboxLine(line) as InboxJob | null;
-    if (job) jobs.push(job);
-  }
-  return jobs;
+  return parseInbox(read("data/pipeline.md")) as InboxJob[];
 }
 
-/**
- * Read data/scan-history.tsv → Map<url, first_seen(YYYY-MM-DD)>. The scanner
- * already stamps every discovered posting with the date it was first seen
- * (col 2), so we derive the inbox's freshness signal here WITHOUT touching the
- * core (see the inbox-triage build: freshness = option A, no scanner change).
- * Tolerant by construction: no file → empty map (freshness facet just hides);
- * a malformed row is skipped, never thrown (missing ≠ corrupt).
- */
+/** data/scan-history.tsv → Map<url, first_seen(YYYY-MM-DD)>; the rule lives in
+ *  inbox-summary.mjs, shared with the root command `node inbox-summary.mjs`. */
 export function readScanDates(): Map<string, string> {
-  const tsv = read("data/scan-history.tsv");
-  const dates = new Map<string, string>();
-  if (!tsv) return dates;
-  const lines = tsv.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line || (i === 0 && line.startsWith("url\t"))) continue; // skip header
-    const tab = line.indexOf("\t");
-    if (tab < 1) continue;
-    const url = line.slice(0, tab);
-    const firstSeen = line.slice(tab + 1).split("\t")[0]?.trim();
-    // keep the EARLIEST first_seen if a url recurs (it's "first" seen, after all)
-    if (/^\d{4}-\d{2}-\d{2}$/.test(firstSeen) && !dates.has(url)) dates.set(url, firstSeen);
-  }
-  return dates;
+  return readScanDatesAt(careerOpsRoot());
 }
 
 /** The advert facts for one inbox row, for the evaluate prompt (ticket 2e):
@@ -281,23 +252,16 @@ export type PipelineSummary = {
 
 export function pipelineSummary(): PipelineSummary {
   const root = careerOpsRoot();
-  const scanDates = readScanDates();
-  const applications = readApplications();
+  // The Inbox is composed in inbox-summary.mjs, the one composition the page,
+  // the Explore add and `node inbox-summary.mjs` share: the freshness date
+  // (first_seen) joined on, newest scan first, and a row the tracker already
+  // holds marked done with its tracker row, ticked or not.
+  const { inbox, applications } = readInboxSummary(root);
   return {
     root,
     rootExists: fs.existsSync(root),
-    // join the freshness date (first_seen) onto each raw posting — the inbox's
-    // triage view faceted-filters on it entirely client-side. The rows come
-    // newest scan first, on scannedAt (see inbox-order.mjs). A row the
-    // tracker already holds is done, ticked or not (see inbox-tracked.mjs).
-    inbox: markTrackedInbox(
-      orderInboxByScan(
-        readInbox().map((j) => ({ ...j, postedAt: j.postedAt ?? scanDates.get(j.url) })),
-        scanDates,
-      ),
-      applications,
-    ),
-    applications,
+    inbox: inbox as InboxJob[],
+    applications: applications as Application[],
   };
 }
 

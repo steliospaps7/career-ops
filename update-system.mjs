@@ -265,6 +265,7 @@ const SYSTEM_PATHS = [
   'tracker.mjs',
   'find.mjs',
   'verify-pipeline.mjs',
+  'inbox-summary.mjs',
   'discard-analytics.mjs',
   'reconcile-pipeline.mjs',
   'dedup-tracker.mjs',

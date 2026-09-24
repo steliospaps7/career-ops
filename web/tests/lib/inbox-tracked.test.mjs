@@ -45,7 +45,7 @@ test("14 September: the three scored and applied rows leave the inbox", () => {
 test("the row keeps every field it was read with", () => {
   const before = inbox();
   const out = markTrackedInbox(before, parseApplications(TRACKER, ROOT));
-  assert.deepEqual(out[1], { ...before[1], done: true });
+  assert.deepEqual(out[1], { ...before[1], done: true, tracked: { n: "221", status: "Applied", date: "2026-09-14" } });
   assert.equal(before[1].done, false, "the input is not changed");
 });
 

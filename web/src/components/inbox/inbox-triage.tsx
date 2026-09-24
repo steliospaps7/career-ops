@@ -17,6 +17,26 @@ const SHORTLIST_KEY = "career-ops:shortlist";
 const CONFIG_KEY = "career-ops:config";
 const BATCH = 20;
 
+/** "N already in the tracker": the rows the Inbox leaves out because the tracker
+ *  holds the seat, each with its tracker row, so no row vanishes unexplained.
+ *  Rendered by InboxTriage and, when every row is hidden, beside the empty Inbox. */
+export function TrackedList({ tracked, className }: { tracked: InboxJob[]; className?: string }) {
+  if (tracked.length === 0) return null;
+  return (
+    <details className={cn("mt-2 text-xs text-faint", className)}>
+      <summary className="cursor-pointer transition-colors hover:text-foreground">{tracked.length} already in the tracker</summary>
+      <ul className="mt-1.5 space-y-1 pl-4">
+        {tracked.map((j) => (
+          <li key={j.url}>
+            <span className="text-muted">{j.company}</span> · {j.role} — tracker row {j.tracked?.n}, {j.tracked?.status || "no status"}
+            {j.tracked?.date ? `, ${j.tracked.date}` : ""}
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
 // The inbox as a TRIAGE surface: Abundance → Triage → Shortlist → Opt-in Score.
 // Default is a small fresh batch (never the full wall); free facets + Save/Skip narrow
 // it; only "Score shortlist" spends tokens. 🔴 The shell is agnostic to what makes a
@@ -25,10 +45,14 @@ const BATCH = 20;
 // this list agree; the list lives in this browser only (see pipeline-view.tsx).
 export function InboxTriage({
   inbox,
+  tracked = [],
   hidden,
   setHidden,
 }: {
   inbox: InboxJob[];
+  /** Rows left out because the tracker already holds the seat, each with its
+   *  tracker row (inbox-tracked.mjs). Listed so a row never vanishes unexplained. */
+  tracked?: InboxJob[];
   hidden: string[];
   setHidden: Dispatch<SetStateAction<string[]>>;
 }) {
@@ -220,6 +244,8 @@ export function InboxTriage({
           </button>
         )}
       </div>
+
+      <TrackedList tracked={tracked} />
 
       {/* multi-select action bar */}
       {selected.size > 0 && (

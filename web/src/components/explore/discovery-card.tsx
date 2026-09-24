@@ -39,7 +39,7 @@ function Logo({ company }: { company: string }) {
 const WORKER_LABEL: Record<string, string> = { evaluate: "Evaluating…", pdf: "Preparing CV…", research: "Researching…", apply: "Filling…" };
 
 export function DiscoveryCard({ offer, inPipeline, evaluatedN }: { offer: DiscoveredOffer; inPipeline: boolean; evaluatedN?: string }) {
-  const { added, adding, addToPipeline } = useExplore();
+  const { added, adding, addFates, addToPipeline } = useExplore();
   const { jobs, startJob } = useJobs();
 
   // GLOBAL worker awareness: any worker acting on this URL drives the CTA, here
@@ -54,6 +54,9 @@ export function DiscoveryCard({ offer, inPipeline, evaluatedN }: { offer: Discov
 
   const isAdded = added.has(offer.url) || inPipeline || working || doneEval;
   const isAdding = adding.has(offer.url);
+  // Set by this page's own add: a written line the Inbox hides says so, and why.
+  const fate = addFates[offer.url];
+  const hiddenFromInbox = fate && !fate.shown;
   const unverified = offer.verification === "unconfirmed";
   const fresh = freshness(offer.postedAt) || offer.postedHint || "";
 
@@ -136,7 +139,7 @@ export function DiscoveryCard({ offer, inPipeline, evaluatedN }: { offer: Discov
               )}
             >
               {isAdding ? <Loader2 className="size-3.5 animate-spin" /> : isAdded ? <Check className="size-3.5" /> : <Plus className="size-3.5" />}
-              {isAdded ? "In pipeline" : "Add to pipeline"}
+              {hiddenFromInbox ? "Not in the Inbox" : fate?.shown ? "In the Inbox" : isAdded ? "In pipeline" : "Add to pipeline"}
             </button>
             <button
               type="button"
@@ -147,6 +150,11 @@ export function DiscoveryCard({ offer, inPipeline, evaluatedN }: { offer: Discov
               Evaluate <Coins className="size-3.5 opacity-80" />
             </button>
           </div>
+        )}
+        {hiddenFromInbox && (
+          <p className="mt-1.5 text-[12px] leading-snug text-amber-600 dark:text-amber-300">
+            The Inbox does not show it: {fate.reason}.
+          </p>
         )}
       </div>
     </div>

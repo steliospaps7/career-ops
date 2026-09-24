@@ -8,7 +8,7 @@ import type { Application, InboxJob } from "@/lib/career-ops";
 import { Badge } from "@/components/ui/badge";
 import { CompanyLogo } from "@/components/company-logo";
 import { canonStatus, scoreNum, scoreTone, statusDot } from "@/lib/format";
-import { InboxTriage } from "@/components/inbox/inbox-triage";
+import { InboxTriage, TrackedList } from "@/components/inbox/inbox-triage";
 import { cn } from "@/lib/cn";
 import { companyPresentation, companySearchText } from "@/lib/company-presentation.mjs";
 import { countNotHidden, parseHiddenList } from "@/lib/inbox-order.mjs";
@@ -95,6 +95,9 @@ export function PipelineView({
     }
     return out;
   }, [inbox]);
+
+  // Rows left out because the tracker holds the seat, listed with their tracker row.
+  const trackedInbox = useMemo(() => inbox.filter((j) => j.tracked), [inbox]);
 
   // Held here, not in InboxTriage, so the header and tab count leave out the rows
   // hidden with X, the same rows the triage list leaves out.
@@ -212,9 +215,12 @@ export function PipelineView({
       {tab === "INBOX" ? (
         /* ── Inbox: the triage surface (Abundance → Triage → Shortlist → Score) ── */
         pendingInbox.length > 0 ? (
-          <InboxTriage inbox={pendingInbox} hidden={hidden} setHidden={setHidden} />
+          <InboxTriage inbox={pendingInbox} tracked={trackedInbox} hidden={hidden} setHidden={setHidden} />
         ) : (
-          <InboxEmpty count={0} filtered={false} />
+          <>
+            <InboxEmpty count={0} filtered={false} />
+            <TrackedList tracked={trackedInbox} className="mx-auto max-w-3xl" />
+          </>
         )
       ) : filtered.length > 0 ? (
         /* ── Tracker table ──
