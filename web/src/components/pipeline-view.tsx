@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Search, ChevronsUpDown, X, Compass, ArrowRight } from "lucide-react";
@@ -12,6 +12,7 @@ import { InboxTriage, TrackedList } from "@/components/inbox/inbox-triage";
 import { cn } from "@/lib/cn";
 import { companyPresentation, companySearchText } from "@/lib/company-presentation.mjs";
 import { countNotHidden, parseHiddenList } from "@/lib/inbox-order.mjs";
+import { migrateBrowserHidden } from "@/lib/inbox-hidden.mjs";
 
 // INBOX (the triage queue) is the default tab; the rest filter the tracker.
 const TABS = [
@@ -32,16 +33,32 @@ type Tab = (typeof TABS)[number];
 const SORT_KEYS = ["company", "role", "score", "status", "date"] as const;
 type SortKey = (typeof SORT_KEYS)[number];
 
-// Rows hidden with X on the inbox. Kept in this browser's localStorage only: an X
-// never reaches pipeline.md, and another browser or device still shows the row.
+// Rows hidden with X on the inbox live in data/inbox-hidden.tsv, written through
+// /api/inbox-hidden, so every browser and every reader of the files leaves out
+// the same rows. They used to live under this localStorage key; on load the page
+// moves any list still stored there into the file once, then clears the key.
 const HIDDEN_KEY = "career-ops:hidden";
+
+async function postHidden(change: { add?: string[]; remove?: string[] }): Promise<{ urls: string[]; count: number; added: number } | null> {
+  const res = await fetch("/api/inbox-hidden", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(change),
+  });
+  if (!res.ok) return null;
+  const j = await res.json();
+  return Array.isArray(j?.urls) && Number.isInteger(j?.count) ? j : null;
+}
 
 export function PipelineView({
   applications,
   inbox,
+  hiddenUrls = [],
 }: {
   applications: Application[];
   inbox: InboxJob[];
+  /** Every URL in data/inbox-hidden.tsv, from the server. */
+  hiddenUrls?: string[];
 }) {
   const params = useSearchParams();
   const router = useRouter();
@@ -84,12 +101,14 @@ export function PipelineView({
   );
 
   // Pending + deduped by URL (pipeline.md can list the same posting twice) so the
-  // header count, the tab count and the triage list all agree on one number.
+  // header count, the tab count and the triage list all agree on one number. A row
+  // hidden with X arrives done from the server; it stays here so the X list below
+  // can take it out and restore can bring it back without a reload.
   const pendingInbox = useMemo(() => {
     const seen = new Set<string>();
     const out: InboxJob[] = [];
     for (const j of inbox) {
-      if (j.done || seen.has(j.url)) continue;
+      if ((j.done && !j.hiddenWithX) || seen.has(j.url)) continue;
       seen.add(j.url);
       out.push(j);
     }
@@ -100,21 +119,56 @@ export function PipelineView({
   const trackedInbox = useMemo(() => inbox.filter((j) => j.tracked), [inbox]);
 
   // Held here, not in InboxTriage, so the header and tab count leave out the rows
-  // hidden with X, the same rows the triage list leaves out.
-  const [hidden, setHidden] = useState<string[]>([]);
-  const [hiddenLoaded, setHiddenLoaded] = useState(false);
-  useEffect(() => {
-    try {
-      const h = localStorage.getItem(HIDDEN_KEY);
-      if (h) setHidden(parseHiddenList(h)); // a non-array value would throw in render and blank the page
-    } catch {
-      /* ignore */
-    }
-    setHiddenLoaded(true);
+  // hidden with X, the same rows the triage list leaves out. Seeded from the file;
+  // a change shows at once and is then replaced by the file's list as the route
+  // answers, or rolled back when it fails.
+  const [hidden, setHiddenState] = useState<string[]>(hiddenUrls);
+  const hiddenRef = useRef(hidden); // kept in step with every setHiddenState below
+  const setHidden = useCallback((next: SetStateAction<string[]>) => {
+    const prev = hiddenRef.current;
+    const value = typeof next === "function" ? next(prev) : next;
+    const add = value.filter((u) => !prev.includes(u));
+    const remove = prev.filter((u) => !value.includes(u));
+    if (!add.length && !remove.length) return;
+    hiddenRef.current = value;
+    setHiddenState(value);
+    postHidden({ add, remove })
+      .then((answer) => {
+        if (!answer) throw new Error("no answer");
+        hiddenRef.current = answer.urls;
+        setHiddenState(answer.urls);
+      })
+      .catch((e) => {
+        console.error("career-ops: the X list was not saved to data/inbox-hidden.tsv", e);
+        const back = hiddenRef.current.filter((u) => !add.includes(u)).concat(remove.filter((u) => !hiddenRef.current.includes(u)));
+        hiddenRef.current = back;
+        setHiddenState(back);
+      });
   }, []);
+  // The one-time move of this browser's old list into the file. The key is cleared
+  // only after the route answers with the merged count, which is logged so it can
+  // be compared with the old "N hidden".
   useEffect(() => {
-    if (hiddenLoaded) try { localStorage.setItem(HIDDEN_KEY, JSON.stringify(hidden)); } catch { /* quota */ }
-  }, [hidden, hiddenLoaded]);
+    migrateBrowserHidden({
+      storage: localStorage,
+      key: HIDDEN_KEY,
+      parse: parseHiddenList, // a non-array value reads as empty, never throws
+      post: (urls: string[]) => postHidden({ add: urls }),
+      log: (msg: string) => console.info(msg),
+    }).then((r) => {
+      if (r.status === "merged") {
+        fetch("/api/inbox-hidden")
+          .then((res) => res.json())
+          .then((j) => {
+            if (Array.isArray(j?.urls)) {
+              hiddenRef.current = j.urls;
+              setHiddenState(j.urls);
+            }
+          })
+          .catch(() => {});
+      }
+    });
+  }, []);
   const inboxCount = useMemo(() => countNotHidden(pendingInbox, hidden), [pendingInbox, hidden]);
 
   const filtered = useMemo(() => {

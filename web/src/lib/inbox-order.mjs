@@ -63,16 +63,17 @@ export function compareScannedAt(a, b) {
 }
 
 /** How many rows the inbox shows once the rows hidden with X are taken out.
- *  The hidden list is kept in this browser only; an entry for a URL no longer
+ *  The hidden list is data/inbox-hidden.tsv; an entry for a URL no longer
  *  pending (ticked, or gone from pipeline.md) is not counted. */
 export function countNotHidden(pending, hidden) {
   const h = new Set(hidden);
   return pending.filter((j) => !h.has(j.url)).length;
 }
 
-/** The stored hidden list, read back from localStorage. Anything that is not
- *  an array of strings (a hand edit, another app's value) reads as empty, so a
- *  bad value cannot throw while the Pipeline page renders. */
+/** The browser's old hidden list, read back from localStorage for its one-time
+ *  move into data/inbox-hidden.tsv. Anything that is not an array of strings (a
+ *  hand edit, another app's value) reads as empty, so a bad value cannot throw
+ *  while the Pipeline page renders. */
 export function parseHiddenList(raw) {
   try {
     const v = JSON.parse(raw);
@@ -80,6 +81,12 @@ export function parseHiddenList(raw) {
   } catch {
     return [];
   }
+}
+
+/** The mark on an Inbox card whose row has no scan date. Such a row sorts after
+ *  every dated row (compareScannedAt); the mark says why it sits there. */
+export function scanDateMark(job) {
+  return job.scannedAt ? null : "no scan date";
 }
 
 /** The number on the "N hidden · restore" control: the hidden rows still in
