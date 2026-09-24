@@ -169,6 +169,44 @@ async function suite() {
     ok('a run with no repeat prints no repeats line', !formatFitSummary(off).some((l) => l.includes('repeat')));
   }
 
+  // ── Repeats and fit_gate.rules_changed: a cut under the old rules is judged again ──
+  {
+    // The rules changed 23 September 2026. A cut on the day of the change
+    // counts as made under the new rules, since the rules are changed before
+    // that day's next run.
+    const CUTS = [
+      '- [x] https://jobs.example.com/before | Before Ltd | Growth Manager | skipped (fit: below the floor, 2026-09-22)',
+      '- [x] https://jobs.example.com/on | On Ltd | Growth Manager | skipped (fit: below the floor, 2026-09-23)',
+      '- [x] https://jobs.example.com/after | After Ltd | Growth Manager | skipped (fit: below the floor, 2026-09-24)',
+      // Filed on the 24th as a repeat of a 22nd cut: its judgement is the 22nd.
+      '- [x] https://jobs.example.com/chained | Chained Ltd | Growth Manager | skipped (fit: SKIP (repeat of 2026-09-22), 2026-09-24)',
+    ].join('\n');
+    const canonicalize = (n) => String(n ?? '').trim().toLowerCase();
+    const today = '2026-09-25';
+    const cuts = collectFitCuts(CUTS, { canonicalize, today, rulesChanged: '2026-09-23' });
+    let calls = 0;
+    const judge = async () => { calls++; return answer('PASS'); };
+    const gate = createFitGate({ settings: { ...SETTINGS, rulesChanged: '2026-09-23' }, rules: RULES, judge, canonicalize, priorCuts: cuts });
+    const before = await gate.assess(row({ company: 'Before Ltd', title: 'Growth Manager' }));
+    ok('a cut before the rules changed is judged again: one call', !before.repeatOf && before.verdict === 'PASS' && calls === 1);
+    const chained = await gate.assess(row({ company: 'Chained Ltd', title: 'Growth Manager' }));
+    ok('a repeat line is compared by the judgement it repeated, before the change: judged', !chained.repeatOf && calls === 2);
+    const on = await gate.assess(row({ company: 'On Ltd', title: 'Growth Manager' }));
+    ok('a cut on the day the rules changed is a repeat', on.repeatOf === '2026-09-23' && calls === 2);
+    const after = await gate.assess(row({ company: 'After Ltd', title: 'Growth Manager' }));
+    ok('a cut after the rules changed is a repeat', after.repeatOf === '2026-09-24' && calls === 2);
+    ok('the repeats line names the cutoff',
+      formatFitSummary(gate).includes('Fit gate repeats:      2 cut by the gate within 14 days, since the rules changed 2026-09-23, filed again with no call'));
+
+    const noDate = collectFitCuts(CUTS, { canonicalize, today });
+    eq('with no date every cut in the window stands, as before', [...noDate.values()].sort().join(' '), '2026-09-22 2026-09-22 2026-09-23 2026-09-24');
+    let plainCalls = 0;
+    const plain = createFitGate({ settings: SETTINGS, rules: RULES, judge: async () => { plainCalls++; return answer('PASS'); }, canonicalize, priorCuts: noDate });
+    const plainBefore = await plain.assess(row({ company: 'Before Ltd', title: 'Growth Manager' }));
+    ok('and the cut before the 23rd is a repeat with no call', plainBefore.repeatOf === '2026-09-22' && plainCalls === 0);
+    ok('and the repeats line reads as before', formatFitSummary(plain).includes('Fit gate repeats:      1 cut by the gate within 14 days, filed again with no call'));
+  }
+
   // ── Every failure is REVIEW, never PASS ────────────────────────────
   {
     const thrown = await gateWith(async () => { throw new Error('spawn claude ENOENT'); }).assess(row());
@@ -421,6 +459,12 @@ async function suite() {
     ok('enabled: true is on, with D2a\'s model and effort and the SKIP switch off', on.enabled && on.model === 'claude-opus-5' && on.effort === 'medium' && on.skip === false);
     eq('a relative rules path resolves against the data root', on.criteriaPath, join(dir, 'rules/criteria.md'));
     eq('the brief defaults to modes/_brief.md', on.briefPath, join(dir, 'modes/_brief.md'));
+    eq('no rules_changed: no cutoff', on.rulesChanged, null);
+    const withDate = (v) => readFitGateSettings(profile(`fit_gate:\n  enabled: true\n  rules_changed: ${v}\n`)).rulesChanged;
+    eq('rules_changed unquoted, read by YAML as a date', withDate('2026-09-23'), '2026-09-23');
+    eq('rules_changed quoted', withDate('"2026-09-23"'), '2026-09-23');
+    eq('rules_changed that is not a real day: no cutoff', withDate('2026-02-30'), null);
+    eq('rules_changed in another shape: no cutoff', withDate('23 Sep 2026'), null);
     eq('the call is D2a\'s shape', JSON.stringify(claudeJudgeArgs(on)), JSON.stringify(['-p', '--model', 'claude-opus-5', '--effort', 'medium', '--tools', '', '--safe-mode', '--no-session-persistence', '--system-prompt', FIT_SYSTEM_PROMPT, '--output-format', 'json']));
   }
 

@@ -89,8 +89,25 @@ export function readFitGateSettings(profilePath, { root = process.cwd() } = {}) 
     callTimeoutMs: positiveNumber(block.call_timeout_seconds, FIT_GATE_DEFAULTS.callTimeoutSeconds) * 1000,
     alwaysAllow: (Array.isArray(block.always_allow) ? block.always_allow : [])
       .filter((c) => typeof c === 'string' && c.trim()),
+    rulesChanged: rulesChangedDate(block.rules_changed),
     command,
   };
+}
+
+/**
+ * `fit_gate.rules_changed`, the day the brief or the criteria last changed, as
+ * YYYY-MM-DD. YAML reads an unquoted date as a Date and a quoted one as a
+ * string; both are taken. Absent, or anything that is not a real calendar day
+ * ("2026-02-30", "23 Sep"), means no cutoff: every cut in the window stands,
+ * as before the key existed, rather than the run failing over a typo.
+ */
+function rulesChangedDate(value) {
+  let iso = '';
+  if (value instanceof Date && Number.isFinite(value.getTime())) iso = value.toISOString().slice(0, 10);
+  else if (typeof value === 'string') iso = value.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return null;
+  const ms = Date.parse(`${iso}T00:00:00Z`);
+  return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 10) === iso ? iso : null;
 }
 
 /** The arguments D2a proved for the judge. The prompt goes on stdin. */
@@ -211,12 +228,19 @@ function dayNumber(isoDate) {
  * date of the judgement it repeated, so the window runs from the last real
  * judgement and a seat re-listed every day is judged afresh after it.
  *
+ * With `rulesChanged` set, a cut dated before that day is not read: it was made
+ * under rules that no longer stand, so the seat is judged again. A cut dated
+ * on the day itself counts as made under the new rules, since the rules are
+ * changed before that day's next run. For a repeat line the date compared is
+ * the judgement it repeated, the same date the window uses.
+ *
  * @returns {Map<string, string>} fitCutKey → the latest cut date, YYYY-MM-DD
  */
-export function collectFitCuts(pipelineText, { canonicalize, today, windowDays = FIT_REPEAT_WINDOW_DAYS } = {}) {
+export function collectFitCuts(pipelineText, { canonicalize, today, windowDays = FIT_REPEAT_WINDOW_DAYS, rulesChanged = null } = {}) {
   const cuts = new Map();
   const todayN = dayNumber(today);
   if (todayN == null) return cuts;
+  const changedN = rulesChanged ? dayNumber(rulesChanged) : null;
   for (const line of String(pipelineText ?? '').split('\n')) {
     if (!/^- \[x\]\s+/.test(line)) continue;
     const tail = line.match(FIT_CUT_TAIL_RE);
@@ -230,6 +254,7 @@ export function collectFitCuts(pipelineText, { canonicalize, today, windowDays =
     const cutOn = tail[1].match(FIT_REPEAT_REASON_RE)?.[1] || tail[2];
     const cutN = dayNumber(cutOn);
     if (cutN == null || todayN - cutN < 0 || todayN - cutN > windowDays) continue;
+    if (changedN != null && cutN < changedN) continue;
     const key = fitCutKey(company, title, canonicalize);
     if (!cuts.has(key) || cuts.get(key) < cutOn) cuts.set(key, cutOn);
   }
@@ -466,7 +491,8 @@ export function formatFitSummary(gate) {
   // Repeats are not judged, so they sit outside "assessed" and get their own
   // count, printed only when there is one so a run without any reads as before.
   if (tally.repeats.length > 0) {
-    lines.push(`Fit gate repeats:      ${tally.repeats.length} cut by the gate within ${FIT_REPEAT_WINDOW_DAYS} days, filed again with no call`);
+    const since = settings.rulesChanged ? `, since the rules changed ${settings.rulesChanged}` : '';
+    lines.push(`Fit gate repeats:      ${tally.repeats.length} cut by the gate within ${FIT_REPEAT_WINDOW_DAYS} days${since}, filed again with no call`);
     for (const repeat of tally.repeats) {
       lines.push(`FIT REPEAT | ${repeat.company || '?'} | ${repeat.title || '?'} | cut on ${repeat.cutOn}, not judged again`);
     }
