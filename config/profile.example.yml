@@ -344,6 +344,8 @@ cover_letter:
 #   max_rows, budget_minutes, call_timeout_seconds — per-run ceilings; rows
 #                   past them are queued as review. Defaults: 100, 30, 180.
 #   always_allow  — company names never SKIPped out of the queue.
+#   rules_changed — YYYY-MM-DD, the day the brief or criteria last changed;
+#                   gate cuts dated on or before it are judged again.
 #   command       — the claude executable and any leading arguments.
 #                   Default: ["claude"].
 #

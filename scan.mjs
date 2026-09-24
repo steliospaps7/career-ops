@@ -5053,9 +5053,10 @@ async function main() {
   // run prints and writes exactly what it did before.
   const fitSettings = readFitGateSettings(PROFILE_PATH, { root: DATA_ROOT });
   // The gate's own cuts of the last 14 days (ticket 2g): a re-listed seat that
-  // matches one is filed again as a SKIP without a call.
+  // matches one is filed again as a SKIP without a call. Cuts made before
+  // `fit_gate.rules_changed` do not count.
   const fitPriorCuts = fitSettings.enabled
-    ? collectFitCuts(readIfExists(PIPELINE_PATH), { canonicalize: canonicalizeCompany, today: localToday() })
+    ? collectFitCuts(readIfExists(PIPELINE_PATH), { canonicalize: canonicalizeCompany, today: localToday(), rulesChanged: fitSettings.rulesChanged })
     : new Map();
   const fitGate = fitSettings.enabled ? buildFitGate(fitSettings, { canonicalize: canonicalizeCompany, priorCuts: fitPriorCuts }) : null;
   if (fitGate) {
