@@ -488,11 +488,12 @@ try {
     };
     let message = '';
     let attempts;
-    try { await provider.fetch({ max_pages: 55 }, abortCtx); } catch (e) { message = String(e?.message); attempts = e?.attempts; }
-    if (/^a16z-speedrun-talent: page 3 of 55 failed after \d+s, 3 attempts: This operation was aborted$/.test(message) && attempts === 3) {
-      pass('a page that fails every attempt is named in the error, with its seconds and attempts');
+    let name;
+    try { await provider.fetch({ max_pages: 55 }, abortCtx); } catch (e) { message = String(e?.message); attempts = e?.attempts; name = e?.name; }
+    if (/^a16z-speedrun-talent: page 3 of 55 failed after \d+s, 3 attempts: This operation was aborted$/.test(message) && attempts === 3 && name === 'AbortError') {
+      pass('a page that fails every attempt is named in the error, with its seconds, attempts and the original error name');
     } else {
-      fail(`failed-page error line = ${JSON.stringify(message)} attempts=${attempts}`);
+      fail(`failed-page error line = ${JSON.stringify(message)} attempts=${attempts} name=${name}`);
     }
   }
 

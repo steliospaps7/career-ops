@@ -215,8 +215,9 @@ export async function runActor(actorId, input, { timeoutMs = DEFAULT_RUN_TIMEOUT
     const reason = run.statusMessage ? `: ${run.statusMessage}` : '';
     throw new Error(`Apify actor ${actorId} finished with status ${run.status}${reason}`);
   }
-  // A run found finished after the deadline gets a fresh one for its dataset:
+  // The dataset read always gets at least LATE_DATASET_READ_MS: a run found
+  // finished near or after the deadline would otherwise be lost, since
   // fetchJson refuses to send anything once the deadline has passed.
-  const datasetDeadline = Date.now() < deadline ? deadline : Date.now() + LATE_DATASET_READ_MS;
+  const datasetDeadline = Math.max(deadline, Date.now() + LATE_DATASET_READ_MS);
   return await fetchDatasetItems(runId, token, datasetDeadline);
 }

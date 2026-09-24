@@ -413,3 +413,38 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
     fail(`failed last read: error=${error?.message}`);
   }
 }
+
+{
+  // SUCCEEDED arrives with under a second left and the dataset takes longer
+  // than that to answer: the read still gets its own time and the items come back.
+  const prevFetch = globalThis.fetch;
+  const DATASET_DELAY_MS = 600;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (u.endsWith('/runs')) return json({ data: { id: 'run1' } });
+    if (u.endsWith('/actor-runs/run1')) return json({ data: { status: 'SUCCEEDED' } });
+    if (u.endsWith('/actor-runs/run1/dataset/items')) {
+      // Honour the abort signal, as a real fetch does.
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, DATASET_DELAY_MS);
+        init.signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('This operation was aborted')); });
+      });
+      return json([{ title: 'Near-deadline item' }]);
+    }
+    return new Response('', { status: 200 });
+  };
+  let items, error;
+  try {
+    items = await runActor('fixture/actor', {}, { timeoutMs: WAIT_MS, token: 'test-token' });
+  } catch (err) {
+    error = err;
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  if (!error && JSON.stringify(items) === JSON.stringify([{ title: 'Near-deadline item' }])) {
+    pass('a run SUCCEEDED with under a second left still gets time to read its dataset');
+  } else {
+    fail(`near-deadline SUCCEEDED run: error=${error?.message} items=${JSON.stringify(items)}`);
+  }
+}

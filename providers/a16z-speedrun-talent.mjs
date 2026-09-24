@@ -178,13 +178,14 @@ export default {
         const of = totalPages ? ` of ${totalPages}` : '';
         const attempts = Number.isInteger(err?.attempts) ? `, ${err.attempts} attempt${err.attempts === 1 ? '' : 's'}` : '';
         const wrapped = new Error(`a16z-speedrun-talent: page ${page + 1}${of} failed after ${seconds}s${attempts}: ${err?.message ?? err}`, { cause: err });
+        if (err?.name) wrapped.name = err.name;
         if (err?.status !== undefined) wrapped.status = err.status;
         if (err?.attempts !== undefined) wrapped.attempts = err.attempts;
         throw wrapped;
       }
       if (!json || !Array.isArray(json.jobs)) {
         throw new Error(
-          `a16z-speedrun-talent: unexpected API response on page ${page} — expected { jobs: [...] }, got keys: [${json ? Object.keys(json).join(', ') : 'null'}]`,
+          `a16z-speedrun-talent: unexpected API response on page ${page + 1} — expected { jobs: [...] }, got keys: [${json ? Object.keys(json).join(', ') : 'null'}]`,
         );
       }
       for (const j of json.jobs) {
