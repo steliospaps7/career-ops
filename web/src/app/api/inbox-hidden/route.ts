@@ -12,8 +12,12 @@ export const dynamic = "force-dynamic";
 // (see inbox-hidden.mjs). pipeline.md is never written here.
 
 export async function GET() {
-  const entries = readHiddenFile(careerOpsRoot());
-  return Response.json({ urls: entries.map((e) => e.url), count: entries.length });
+  try {
+    const entries = readHiddenFile(careerOpsRoot());
+    return Response.json({ urls: entries.map((e) => e.url), count: entries.length });
+  } catch (e) {
+    return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
+  }
 }
 
 // Body: { add?: string[], remove?: string[] }. An X adds one URL, undo and

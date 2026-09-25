@@ -93,7 +93,14 @@ export function readInboxSummary(root) {
   const tracker = readText(root, "data/applications.md");
   const jobs = parseInbox(md);
   const applications = tracker ? parseApplications(tracker, root) : [];
-  const hiddenEntries = readHiddenFile(root);
+  // A file that exists but cannot be read shows every row rather than blanking
+  // the page; only the route's write refuses on it (inbox-hidden-file.mjs).
+  let hiddenEntries = [];
+  try {
+    hiddenEntries = readHiddenFile(root);
+  } catch {
+    /* shown as if nothing were hidden */
+  }
   return { jobs, applications, hiddenEntries, inbox: composeInbox(jobs, readScanDates(root), applications, hiddenEntries) };
 }
 

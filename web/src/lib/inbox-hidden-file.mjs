@@ -17,13 +17,19 @@ export function hiddenFilePath(root) {
   return path.join(root, HIDDEN_FILE);
 }
 
-/** The file's entries; a missing or unreadable file reads as none. */
+/** The file's entries. Only a missing file reads as none; any other read error
+ *  throws. A failed read that returned [] would let the next X write a file
+ *  holding only that URL and wipe every earlier X, so the route answers 500 and
+ *  the page rolls the X back instead. */
 export function readHiddenFile(root) {
+  let text;
   try {
-    return parseHiddenTsv(fs.readFileSync(hiddenFilePath(root), "utf8"));
-  } catch {
-    return [];
+    text = fs.readFileSync(hiddenFilePath(root), "utf8");
+  } catch (e) {
+    if (e && e.code === "ENOENT") return [];
+    throw e;
   }
+  return parseHiddenTsv(text);
 }
 
 /**

@@ -20,6 +20,7 @@ import {
   applyHiddenChange,
   cleanUrlList,
   migrateBrowserHidden,
+  answerGate,
 } from "../../src/lib/inbox-hidden.mjs";
 import { readHiddenFile, updateHiddenFile } from "../../src/lib/inbox-hidden-file.mjs";
 import { readInboxSummary, countInbox, inboxFate } from "../../src/lib/inbox-summary.mjs";
@@ -114,6 +115,29 @@ test("a request's URL list: non-arrays, non-strings, tabs and line breaks droppe
   assert.deepEqual(cleanUrlList("not a list"), []);
   assert.deepEqual(cleanUrlList([A, 7, null, "  ", `${B}\tx`, `${C}\nx`, ` ${A} `]), [A]);
   assert.deepEqual(applyHiddenChange([], { add: [A], remove: [A] }, T1), { entries: [], added: 0, removed: 0 });
+});
+
+test("a file that exists but cannot be read throws; the X writes nothing, the page still reads", () => {
+  // A directory where the file should be: readFileSync fails with EISDIR, not ENOENT.
+  const root = dataFolder();
+  fs.mkdirSync(path.join(root, HIDDEN_FILE));
+  assert.throws(() => readHiddenFile(root), { code: "EISDIR" });
+  let wrote = false;
+  assert.throws(() => updateHiddenFile(root, { add: [A] }, { write: () => (wrote = true) }), { code: "EISDIR" });
+  assert.equal(wrote, false, "a failed read must never lead to a write holding only the new URL");
+  const { jobs, inbox } = readInboxSummary(root);
+  assert.equal(countInbox(jobs, inbox).shown.length, 4, "the page shows every row rather than failing");
+});
+
+test("an answer is applied only if no later request has been answered", () => {
+  const gate = answerGate();
+  const first = gate.next();
+  const second = gate.next();
+  assert.equal(gate.accept(second), true, "the later X answers first and stands");
+  assert.equal(gate.accept(first), false, "the older answer, arriving last, is dropped");
+  const third = gate.next();
+  assert.equal(gate.accept(third), true);
+  assert.equal(gate.accept(third), false, "one answer per request");
 });
 
 // ── the browser's old list, moved once ──────────────────────────────────────

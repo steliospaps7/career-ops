@@ -109,6 +109,25 @@ export function markHiddenInbox(inbox, entries) {
 }
 
 /**
+ * Numbers the page's requests to /api/inbox-hidden and says whether an answer
+ * may be applied: only when no later request has been answered already. Two
+ * quick X presses can be answered out of order, and the older answer, arriving
+ * last, would put back a list without the newer X.
+ */
+export function answerGate() {
+  let sent = 0;
+  let answered = 0;
+  return {
+    next: () => ++sent,
+    accept: (seq) => {
+      if (seq <= answered) return false;
+      answered = seq;
+      return true;
+    },
+  };
+}
+
+/**
  * Move the browser's old list (localStorage, before the file existed) into the
  * file, once. `post(urls)` sends them to the route and resolves to its answer.
  * The browser key is cleared only when the answer carries the merged count; a

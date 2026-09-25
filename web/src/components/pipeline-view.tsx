@@ -12,7 +12,7 @@ import { InboxTriage, TrackedList } from "@/components/inbox/inbox-triage";
 import { cn } from "@/lib/cn";
 import { companyPresentation, companySearchText } from "@/lib/company-presentation.mjs";
 import { countNotHidden, parseHiddenList } from "@/lib/inbox-order.mjs";
-import { migrateBrowserHidden } from "@/lib/inbox-hidden.mjs";
+import { answerGate, migrateBrowserHidden } from "@/lib/inbox-hidden.mjs";
 
 // INBOX (the triage queue) is the default tab; the rest filter the tracker.
 const TABS = [
@@ -124,6 +124,8 @@ export function PipelineView({
   // answers, or rolled back when it fails.
   const [hidden, setHiddenState] = useState<string[]>(hiddenUrls);
   const hiddenRef = useRef(hidden); // kept in step with every setHiddenState below
+  // Each request is numbered; an answer is applied only if no later one has been.
+  const gate = useRef(answerGate()).current;
   const setHidden = useCallback((next: SetStateAction<string[]>) => {
     const prev = hiddenRef.current;
     const value = typeof next === "function" ? next(prev) : next;
@@ -132,9 +134,11 @@ export function PipelineView({
     if (!add.length && !remove.length) return;
     hiddenRef.current = value;
     setHiddenState(value);
+    const seq = gate.next();
     postHidden({ add, remove })
       .then((answer) => {
         if (!answer) throw new Error("no answer");
+        if (!gate.accept(seq)) return; // a later request's answer already stands
         hiddenRef.current = answer.urls;
         setHiddenState(answer.urls);
       })
@@ -144,7 +148,7 @@ export function PipelineView({
         hiddenRef.current = back;
         setHiddenState(back);
       });
-  }, []);
+  }, [gate]);
   // The one-time move of this browser's old list into the file. The key is cleared
   // only after the route answers with the merged count, which is logged so it can
   // be compared with the old "N hidden".
@@ -157,10 +161,11 @@ export function PipelineView({
       log: (msg: string) => console.info(msg),
     }).then((r) => {
       if (r.status === "merged") {
+        const seq = gate.next();
         fetch("/api/inbox-hidden")
           .then((res) => res.json())
           .then((j) => {
-            if (Array.isArray(j?.urls)) {
+            if (Array.isArray(j?.urls) && gate.accept(seq)) {
               hiddenRef.current = j.urls;
               setHiddenState(j.urls);
             }
@@ -168,7 +173,7 @@ export function PipelineView({
           .catch(() => {});
       }
     });
-  }, []);
+  }, [gate]);
   const inboxCount = useMemo(() => countNotHidden(pendingInbox, hidden), [pendingInbox, hidden]);
 
   const filtered = useMemo(() => {
