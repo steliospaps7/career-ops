@@ -6,6 +6,7 @@ import type { InboxJob } from "@/lib/career-ops";
 import type { AtsSource } from "@/lib/explore";
 import { ATS_LABEL } from "@/lib/explore";
 import { fitCardLine } from "@/lib/inbox-line.mjs";
+import { scanDateMark } from "@/lib/inbox-order.mjs";
 import { Badge } from "@/components/ui/badge";
 import { CompanyLogo } from "@/components/company-logo";
 import { cn } from "@/lib/cn";
@@ -50,6 +51,8 @@ export function TriageRow({
   // The fit judgement's verdict from the queue line (ticket D2b): `PASS` or
   // `review: <reason>`, nothing when the row was never judged.
   const fitLine = fitCardLine(job);
+  // A row the scan history never dated sorts to the bottom; this says why.
+  const noScanDate = scanDateMark(job);
 
   return (
     <li
@@ -79,6 +82,11 @@ export function TriageRow({
           {job.location && <span className="truncate">{job.location}</span>}
           {source && <span className="rounded bg-surface-hover px-1 py-px font-medium text-muted">{ATS_LABEL[source]}</span>}
           {ago && <span>{ago}</span>}
+          {noScanDate && (
+            <span className="rounded border border-border px-1 py-px" title="The scan history holds no date for this row, so it sorts after every dated row">
+              {noScanDate}
+            </span>
+          )}
           {/* 🔴 CRUDA: honest "not scored" — no fabricated match%. */}
           {!evaluated && <span className="italic text-muted">not scored</span>}
         </p>
