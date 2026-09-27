@@ -74,7 +74,7 @@ function read(rel: string): string | null {
   }
 }
 
-export type InboxJob = { url: string; company: string; role: string; location?: string; compensation?: string; done: boolean; postedAt?: string; scannedAt?: string; fit?: string; route?: string; jd?: string; tracked?: { n: string; status: string; date: string } };
+export type InboxJob = { url: string; company: string; role: string; location?: string; compensation?: string; done: boolean; postedAt?: string; scannedAt?: string; fit?: string; route?: string; jd?: string; tracked?: { n: string; status: string; date: string }; hiddenWithX?: { at: string } };
 
 /** Parse data/pipeline.md into inbox jobs. The per-line rule, labeled segments
  *  included, lives in lib/inbox-line.mjs so it can be tested without a build. */
@@ -248,6 +248,8 @@ export type PipelineSummary = {
   rootExists: boolean;
   inbox: InboxJob[];
   applications: Application[];
+  /** Every URL in data/inbox-hidden.tsv, rows no longer pending included. */
+  hiddenUrls: string[];
 };
 
 export function pipelineSummary(): PipelineSummary {
@@ -255,13 +257,15 @@ export function pipelineSummary(): PipelineSummary {
   // The Inbox is composed in inbox-summary.mjs, the one composition the page,
   // the Explore add and `node inbox-summary.mjs` share: the freshness date
   // (first_seen) joined on, newest scan first, and a row the tracker already
-  // holds marked done with its tracker row, ticked or not.
-  const { inbox, applications } = readInboxSummary(root);
+  // holds marked done with its tracker row, ticked or not, and a row hidden
+  // with X (data/inbox-hidden.tsv) marked done with its time.
+  const { inbox, applications, hiddenEntries } = readInboxSummary(root);
   return {
     root,
     rootExists: fs.existsSync(root),
     inbox: inbox as InboxJob[],
     applications: applications as Application[],
+    hiddenUrls: hiddenEntries.map((e) => e.url),
   };
 }
 

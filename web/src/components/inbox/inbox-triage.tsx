@@ -42,7 +42,7 @@ export function TrackedList({ tracked, className }: { tracked: InboxJob[]; class
 // it; only "Score shortlist" spends tokens. 🔴 The shell is agnostic to what makes a
 // role relevant — order is freshness with a single documented plug point.
 // The rows hidden with X are held by PipelineView, so its "N in inbox" count and
-// this list agree; the list lives in this browser only (see pipeline-view.tsx).
+// this list agree; the list lives in data/inbox-hidden.tsv (see pipeline-view.tsx).
 export function InboxTriage({
   inbox,
   tracked = [],
