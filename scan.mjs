@@ -4458,6 +4458,9 @@ export function readLastRunSources(filePath = SCAN_SOURCES_PATH) {
   return rows;
 }
 
+// A paid feed under this many postings on two runs running is named in the summary.
+export const NEAR_EMPTY_PAID_FEED = 5;
+
 /**
  * One warning per paid feed that found nothing on this run and on its last
  * appearance in the log. A paid feed can go quiet for days while its reader
@@ -4466,6 +4469,10 @@ export function readLastRunSources(filePath = SCAN_SOURCES_PATH) {
  * then names the status of each run, so a timeout reads differently from a
  * feed that answered with nothing.
  *
+ * A feed under NEAR_EMPTY_PAID_FEED on both runs, but not empty on both, gets
+ * the "under" line instead, with each run's status and count: Indeed found 1,
+ * 1 and 9 on 27 and 28 September 2026 and the empty line stayed silent.
+ *
  * @param {Array<object>} records - from ledger.records()
  * @param {Map<string, {paid: boolean, status: string, found: number}>} previous - from readLastRunSources
  * @returns {string[]}
@@ -4473,13 +4480,18 @@ export function readLastRunSources(filePath = SCAN_SOURCES_PATH) {
 export function emptyPaidFeedWarnings(records, previous) {
   const lines = [];
   for (const r of records) {
-    if (!r.paid || r.found !== 0) continue;
+    if (!r.paid || r.found >= NEAR_EMPTY_PAID_FEED) continue;
     const before = previous.get(sanitizeTsvField(r.name));
-    if (!before || !before.paid || before.found !== 0) continue;
-    const statuses = r.status === 'empty' && before.status === 'empty'
-      ? ''
-      : ` (last run ${before.status}, this run ${r.status})`;
-    lines.push(`WARNING: ${r.name} empty two runs running${statuses}`);
+    if (!before || !before.paid || !(before.found < NEAR_EMPTY_PAID_FEED)) continue;
+    if (r.found === 0 && before.found === 0) {
+      const statuses = r.status === 'empty' && before.status === 'empty'
+        ? ''
+        : ` (last run ${before.status}, this run ${r.status})`;
+      lines.push(`WARNING: ${r.name} empty two runs running${statuses}`);
+    } else {
+      lines.push(`WARNING: ${r.name} under ${NEAR_EMPTY_PAID_FEED} two runs running `
+        + `(last run ${before.status} ${before.found}, this run ${r.status} ${r.found})`);
+    }
   }
   return lines;
 }

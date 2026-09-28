@@ -19,6 +19,7 @@ const {
   createSourceLedger,
   readLastRunSources,
   emptyPaidFeedWarnings,
+  NEAR_EMPTY_PAID_FEED,
   SCAN_SOURCES_HEADER,
 } = await import(pathToFileURL(join(ROOT, 'scan.mjs')).href);
 
@@ -86,6 +87,55 @@ try {
     pass('a feed that errored warns with the status of each run');
   } else {
     fail(`error warnings = ${JSON.stringify(errorWarnings)}`);
+  }
+
+  // Near empty: under NEAR_EMPTY_PAID_FEED (5) on both runs. Indeed found 1, 1
+  // and 9 on 27 and 28 September 2026 and the empty line said nothing.
+  function nearEmpty(lastFound, thisFound, withHandRun = false) {
+    const p = join(dir, `near-${lastFound}-${thisFound}-${withHandRun}.tsv`);
+    writeFileSync(p, SCAN_SOURCES_HEADER
+      + `2026-09-27T16:03:00.000Z\t${INDEED}\tcompany\tpaid\t${lastFound === 0 ? 'empty' : 'ok'}\t${lastFound}\t0\t${lastFound}\t\t\n`
+      + (withHandRun ? '2026-09-27T18:00:00.000Z\tMonzo\tcompany\tfree\tok\t71\t0\t71\ttitle=71\t\n' : ''));
+    const run = createSourceLedger();
+    run.register(INDEED, { paid: true });
+    if (thisFound > 0) run.found(INDEED, thisFound);
+    return emptyPaidFeedWarnings(run.records(), readLastRunSources(p));
+  }
+
+  const oneOne = nearEmpty(1, 1);
+  const oneOneLine = `WARNING: ${INDEED} under 5 two runs running (last run ok 1, this run ok 1)`;
+  if (NEAR_EMPTY_PAID_FEED === 5 && oneOne.length === 1 && oneOne[0] === oneOneLine) {
+    pass('1 then 1 prints the under-5 line with each run\'s status and count');
+  } else {
+    fail(`1 then 1 = ${JSON.stringify(oneOne)}`);
+  }
+
+  const zeroZero = nearEmpty(0, 0);
+  if (zeroZero.length === 1 && zeroZero[0] === `WARNING: ${INDEED} empty two runs running`) {
+    pass('0 then 0 keeps the empty line, unchanged');
+  } else {
+    fail(`0 then 0 = ${JSON.stringify(zeroZero)}`);
+  }
+
+  const fourFive = nearEmpty(4, 5);
+  if (fourFive.length === 0) {
+    pass('4 then 5 prints nothing (5 is not under 5)');
+  } else {
+    fail(`4 then 5 = ${JSON.stringify(fourFive)}`);
+  }
+
+  const nineOne = nearEmpty(9, 1);
+  if (nineOne.length === 0) {
+    pass('9 then 1 prints nothing (one low run is not two)');
+  } else {
+    fail(`9 then 1 = ${JSON.stringify(nineOne)}`);
+  }
+
+  const walked = nearEmpty(1, 1, true);
+  if (walked.length === 1 && walked[0] === oneOneLine) {
+    pass('a one-board hand run between two runs of 1 is walked past, and the under-5 line prints');
+  } else {
+    fail(`1, hand run, 1 = ${JSON.stringify(walked)}`);
   }
 
   // No log yet (first run ever): nothing to compare with, no warning.
