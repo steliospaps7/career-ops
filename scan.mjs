@@ -4453,7 +4453,9 @@ export function readLastRunSources(filePath = SCAN_SOURCES_PATH) {
   for (let i = lines.length - 1; i >= 0; i--) {
     const cols = lines[i].split('\t');
     if (cols[0] === 'timestamp' || rows.has(cols[1])) continue;
-    rows.set(cols[1], { paid: cols[3] === 'paid', status: cols[4], found: Number(cols[5]) });
+    // A blank count is NaN, not 0 (Number('') is 0), so it is never read as an empty run.
+    const found = (cols[5] ?? '').trim() === '' ? NaN : Number(cols[5]);
+    rows.set(cols[1], { paid: cols[3] === 'paid', status: cols[4], found });
   }
   return rows;
 }
@@ -4462,8 +4464,8 @@ export function readLastRunSources(filePath = SCAN_SOURCES_PATH) {
 export const NEAR_EMPTY_PAID_FEED = 5;
 
 /**
- * One warning per paid feed that found nothing on this run and on its last
- * appearance in the log. A paid feed can go quiet for days while its reader
+ * One warning per paid feed under NEAR_EMPTY_PAID_FEED on this run and on its
+ * last appearance in the log, in the old "empty" wording when both are 0. A paid feed can go quiet for days while its reader
  * reports success (Indeed, 19 to 21 September 2026), and one empty run is
  * normal, so it takes two. A run that errored also found nothing; the line
  * then names the status of each run, so a timeout reads differently from a
@@ -4482,7 +4484,8 @@ export function emptyPaidFeedWarnings(records, previous) {
   for (const r of records) {
     if (!r.paid || r.found >= NEAR_EMPTY_PAID_FEED) continue;
     const before = previous.get(sanitizeTsvField(r.name));
-    if (!before || !before.paid || !(before.found < NEAR_EMPTY_PAID_FEED)) continue;
+    // A last row whose count is not a number gives no warning.
+    if (!before || !before.paid || !Number.isFinite(before.found) || before.found >= NEAR_EMPTY_PAID_FEED) continue;
     if (r.found === 0 && before.found === 0) {
       const statuses = r.status === 'empty' && before.status === 'empty'
         ? ''
