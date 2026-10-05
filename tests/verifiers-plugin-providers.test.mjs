@@ -155,3 +155,40 @@ const MINIMAL_TRACKER =
     rmSync(tmp, { recursive: true, force: true });
   }
 }
+
+// ── 3. dryRun reaches the plugin: mergeProviderPlugins builds the plugin's ctx
+//    once, so a dry run (scan.mjs --dry-run, or verify-portals.mjs, which calls
+//    every entry's fetch) must be passed in for a plugin to see ctx.dryRun. ──
+{
+  const tmp = mkdtempSync(join(tmpdir(), 'co-dryrun-'));
+  try {
+    const probeDir = join(tmp, 'plugins', 'dryrun-probe');
+    mkdirSync(probeDir, { recursive: true });
+    writeFileSync(join(probeDir, 'manifest.json'), JSON.stringify({
+      id: 'dryrun-probe', name: 'Dry-run probe', version: '1.0.0', apiVersion: 1,
+      description: 'Test fixture: returns the ctx.dryRun it was given.',
+      hooks: ['provider'], requiredEnv: [], allowedHosts: [], humanInTheLoop: true,
+    }));
+    writeFileSync(join(probeDir, 'index.mjs'),
+      "export default { provider: { id: 'dryrun-probe', detect() { return null; }, async fetch(entry, ctx) { return [{ dryRun: ctx.dryRun }]; } } };\n");
+    mkdirSync(join(tmp, 'config'), { recursive: true });
+    writeFileSync(join(tmp, 'config', 'plugins.yml'), 'plugins:\n  dryrun-probe: { enabled: true }\n');
+
+    const { mergeProviderPlugins } = await import(new URL('../plugins/_engine.mjs', import.meta.url).href);
+    const seen = async (opts) => {
+      const map = new Map();
+      await mergeProviderPlugins(map, { root: tmp, ...opts });
+      const jobs = await map.get('dryrun-probe')?.fetch({});
+      return jobs?.[0]?.dryRun;
+    };
+    const dry = await seen({ dryRun: true });
+    const plain = await seen({});
+    if (dry === true && plain === false) {
+      pass('mergeProviderPlugins passes dryRun: true through to the plugin\'s ctx.dryRun (false when not given)');
+    } else {
+      fail(`ctx.dryRun with dryRun: true = ${dry}, without = ${plain}`);
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}

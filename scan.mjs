@@ -4820,7 +4820,7 @@ async function main() {
   // Opt-in: merge enabled keyed/auth-gated provider plugins. Returns immediately
   // (no discovery, no dotenv, no process.env mutation) when config/plugins.yml is
   // absent — so a plain scan with no plugins configured stays byte-identical.
-  await mergeProviderPlugins(providers, { root: path.dirname(PROVIDERS_DIR) });
+  await mergeProviderPlugins(providers, { root: path.dirname(PROVIDERS_DIR), dryRun });
   if (providers.size === 0) {
     console.error('Error: no providers loaded from providers/');
     process.exit(1);

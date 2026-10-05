@@ -10,7 +10,7 @@
 import { pass, fail, ROOT, rmSync } from '../helpers.mjs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 
@@ -469,3 +469,302 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
     fail(`near-deadline SUCCEEDED run: error=${error?.message} items=${JSON.stringify(items)}`);
   }
 }
+
+// ── A run given up on is read at the next scan ───────────────────────────────
+//
+// A run the plugin gives up on (the wait clock ran out while the Mac slept) or
+// whose dataset read failed is recorded in data/apify-unread-runs.tsv. The
+// next successful fetch of the same entry reads it and returns its items with
+// its own. Each case runs in its own temp folder, the plugin's working folder.
+
+const UNREAD = join('data', 'apify-unread-runs.tsv');
+const DAY_MS = 86_400_000;
+const LINKEDIN = { name: 'LinkedIn — London', actor: 'fixture/actor', field_map: BASE_MAP };
+const INDEED = { name: 'Indeed — London', actor: 'fixture/indeed', field_map: BASE_MAP };
+const job = (n) => ({ title: `Role ${n}`, url: `https://example.com/jobs/${n}`, company: 'Acme', location: 'London' });
+const unreadLine = (entry, runId, recordedAt, actor = entry.actor) => `${entry.name}\t${actor}\t${runId}\t${recordedAt}`;
+const writeUnread = (dir, lines) => {
+  mkdirSync(join(dir, 'data'), { recursive: true });
+  writeFileSync(join(dir, UNREAD), lines.map(l => `${l}\n`).join(''));
+};
+const readUnread = (dir) => (existsSync(join(dir, UNREAD)) ? readFileSync(join(dir, UNREAD), 'utf-8') : null);
+const unreadIds = (dir) => (readUnread(dir) || '').split('\n').filter(Boolean).map(l => l.split('\t')[2]);
+
+// `runs` maps a run id to { status, items }: a string or a function returning a
+// Response (or throwing, as a dropped network does). A run not in the map
+// answers 404. `starts` maps an actor's URL form to the run id a start returns.
+function stubRuns(runs, starts = { 'fixture~actor': 'own1', 'fixture~indeed': 'own2' }) {
+  return async (url) => {
+    const u = String(url);
+    const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    if (u.endsWith('/abort')) return json({});
+    let m = /\/acts\/([^/]+)\/runs$/.exec(u);
+    if (m) return json({ data: { id: starts[m[1]] } });
+    m = /\/actor-runs\/([^/]+)\/dataset\/items$/.exec(u);
+    if (m) {
+      const run = runs[m[1]];
+      if (!run) return new Response('run not found', { status: 404 });
+      return typeof run.items === 'function' ? run.items() : json(run.items || []);
+    }
+    m = /\/actor-runs\/([^/]+)$/.exec(u);
+    if (m) {
+      const run = runs[m[1]];
+      if (!run) return new Response('run not found', { status: 404 });
+      return typeof run.status === 'function' ? run.status() : json({ data: { status: run.status } });
+    }
+    return new Response('unexpected request', { status: 404 });
+  };
+}
+
+// The provider's fetch for one entry, inside `dir`, with the log lines kept.
+async function fetchEntry(dir, entry, runs, { dryRun = false } = {}) {
+  const prevCwd = process.cwd();
+  const prevFetch = globalThis.fetch;
+  const prevLog = console.log;
+  const prevWarn = console.warn;
+  const logs = [];
+  console.log = (...a) => logs.push(a.join(' '));
+  console.warn = (...a) => logs.push(a.join(' '));
+  globalThis.fetch = stubRuns(runs);
+  process.chdir(dir);
+  try {
+    return { jobs: await provider.fetch(entry, { env: { APIFY_TOKEN: 'test-token' }, dryRun }), logs };
+  } catch (error) {
+    return { error, logs };
+  } finally {
+    await sleep(20); // let the fire-and-forget abort land before the stub goes
+    process.chdir(prevCwd);
+    globalThis.fetch = prevFetch;
+    console.log = prevLog;
+    console.warn = prevWarn;
+  }
+}
+
+function inTempDir(fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'apify-unread-test-'));
+  return Promise.resolve(fn(dir)).finally(() => rmSync(dir, { recursive: true, force: true }));
+}
+
+const GIVE_UP_MS = 300;
+const givingUp = { ...LINKEDIN, timeout_ms: GIVE_UP_MS };
+const urls = (jobs) => (jobs || []).map(j => j.url).sort().join(' ');
+const networkDown = () => { throw new TypeError('fetch failed'); };
+const http = (status, text) => () => new Response(text, { status });
+
+await inTempDir(async (dir) => {
+  const before = Date.now();
+  const { error } = await fetchEntry(dir, givingUp, { own1: { status: 'RUNNING' } });
+  const lines = (readUnread(dir) || '').split('\n').filter(Boolean);
+  const fields = (lines[0] || '').split('\t');
+  const at = Date.parse(fields[3]);
+  if (
+    error?.message === 'Apify run own1 did not finish within 0s (status RUNNING)' && error.runId === 'own1' &&
+    lines.length === 1 && fields.length === 4 &&
+    fields[0] === LINKEDIN.name && fields[1] === 'fixture/actor' && fields[2] === 'own1' &&
+    /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(fields[3]) && at >= before - 1000 && at <= Date.now()
+  ) {
+    pass('a run given up on is thrown with the same message, carries runId, and is recorded as one four-field line');
+  } else {
+    fail(`given-up run: error=${error?.message} runId=${error?.runId} file=${JSON.stringify(readUnread(dir))}`);
+  }
+});
+
+await inTempDir(async (dir) => {
+  const { error } = await fetchEntry(dir, LINKEDIN, { own1: { status: 'SUCCEEDED', items: http(500, 'dataset down') } });
+  if (error?.message === 'HTTP 500: dataset down' && error.runId === 'own1' && JSON.stringify(unreadIds(dir)) === '["own1"]') {
+    pass('a dataset read that fails after SUCCEEDED is thrown as before and its run is recorded');
+  } else {
+    fail(`dataset failure: error=${error?.message} runId=${error?.runId} ids=${JSON.stringify(unreadIds(dir))}`);
+  }
+});
+
+await inTempDir(async (dir) => {
+  writeFileSync(join(dir, 'data'), ''); // a file where data/ should be: the record cannot be written
+  const { error, logs } = await fetchEntry(dir, givingUp, { own1: { status: 'RUNNING' } });
+  const recordLogs = logs.filter(l => /could not record run own1/.test(l));
+  if (error?.message === 'Apify run own1 did not finish within 0s (status RUNNING)' && error.runId === 'own1' && recordLogs.length === 1) {
+    pass('a record that cannot be written logs one line and the original error is still thrown');
+  } else {
+    fail(`failed record: error=${error?.message} logs=${JSON.stringify(logs)}`);
+  }
+});
+
+await inTempDir(async (dir) => {
+  const recorded = new Date(Date.now() - DAY_MS).toISOString();
+  const otherLine = unreadLine(INDEED, 'idx1', recorded);
+  writeUnread(dir, [unreadLine(LINKEDIN, 'early1', recorded), otherLine]);
+  const { jobs, error, logs } = await fetchEntry(dir, LINKEDIN, {
+    own1: { status: 'SUCCEEDED', items: [job(1)] },
+    early1: { status: 'SUCCEEDED', items: [job(2), job(3)] },
+    idx1: { status: 'SUCCEEDED', items: [job(9)] },
+  });
+  const readLog = logs.filter(l => l === `apify: ${LINKEDIN.name}: read 2 items from earlier run early1 (recorded ${recorded})`);
+  if (!error && urls(jobs) === urls([job(1), job(2), job(3)]) && readUnread(dir) === `${otherLine}\n` && readLog.length === 1) {
+    pass('the next fetch returns the earlier run\'s items with its own, logs one line, removes its line and leaves another entry\'s line');
+  } else {
+    fail(`earlier run read: error=${error?.message} jobs=${urls(jobs)} file=${JSON.stringify(readUnread(dir))} logs=${JSON.stringify(logs)}`);
+  }
+});
+
+for (const [label, run] of [
+  ['RUNNING', { status: 'RUNNING' }],
+  ['a network error', { status: networkDown }],
+  ['a failed dataset read', { status: 'SUCCEEDED', items: http(503, 'busy') }],
+  ['a 404 on the dataset read after SUCCEEDED', { status: 'SUCCEEDED', items: http(404, 'dataset not found') }],
+  ['a 403 on the status read', { status: http(403, 'forbidden') }],
+]) {
+  await inTempDir(async (dir) => {
+    writeUnread(dir, [unreadLine(LINKEDIN, 'early1', new Date().toISOString())]);
+    const before = readUnread(dir);
+    const { jobs, error } = await fetchEntry(dir, LINKEDIN, { own1: { status: 'SUCCEEDED', items: [job(1)] }, early1: run });
+    if (!error && urls(jobs) === urls([job(1)]) && readUnread(dir) === before) {
+      pass(`an earlier run with ${label} keeps its line and this run still returns its own items`);
+    } else {
+      fail(`earlier run with ${label}: error=${error?.message} jobs=${urls(jobs)} file=${JSON.stringify(readUnread(dir))}`);
+    }
+  });
+}
+
+await inTempDir(async (dir) => {
+  const now = new Date().toISOString();
+  const eightDaysAgo = new Date(Date.now() - 8 * DAY_MS).toISOString();
+  writeUnread(dir, [
+    unreadLine(LINKEDIN, 'failed1', now),
+    unreadLine(LINKEDIN, 'aborted1', now),
+    unreadLine(LINKEDIN, 'timedout1', now),
+    unreadLine(LINKEDIN, 'gone1', now),
+    unreadLine(LINKEDIN, 'otheractor1', now, 'fixture/other'),
+    unreadLine(LINKEDIN, 'old1', eightDaysAgo),
+  ]);
+  const { jobs, error } = await fetchEntry(dir, LINKEDIN, {
+    own1: { status: 'SUCCEEDED', items: [job(1)] },
+    failed1: { status: 'FAILED' },
+    aborted1: { status: 'ABORTED' },
+    timedout1: { status: 'TIMED-OUT' },
+    // gone1 is not in the map: 404
+    otheractor1: { status: 'SUCCEEDED', items: [job(7)] },
+    old1: { status: 'SUCCEEDED', items: [job(8)] },
+  });
+  if (!error && urls(jobs) === urls([job(1)]) && readUnread(dir) === '') {
+    pass('FAILED, ABORTED, TIMED-OUT, a 404, a different actor and an 8-day-old line are dropped, and none is read');
+  } else {
+    fail(`dropped lines: error=${error?.message} jobs=${urls(jobs)} file=${JSON.stringify(readUnread(dir))}`);
+  }
+});
+
+await inTempDir(async (dir) => {
+  const staleOther = unreadLine(INDEED, 'idxold', new Date(Date.now() - 8 * DAY_MS).toISOString());
+  const freshOther = unreadLine(INDEED, 'idxnew', new Date().toISOString());
+  writeUnread(dir, [staleOther, freshOther]);
+  const { error } = await fetchEntry(dir, givingUp, { own1: { status: 'RUNNING' } });
+  const ids = unreadIds(dir);
+  if (error?.runId === 'own1' && JSON.stringify(ids) === '["idxnew","own1"]') {
+    pass('an 8-day-old line of another entry is dropped on any write; a fresh one stays');
+  } else {
+    fail(`stale other-entry line: error=${error?.message} ids=${JSON.stringify(ids)}`);
+  }
+});
+
+await inTempDir(async (dir) => {
+  writeUnread(dir, [unreadLine(LINKEDIN, 'early1', new Date().toISOString())]);
+  const before = readUnread(dir);
+  let reads = 0;
+  const { error } = await fetchEntry(dir, LINKEDIN, {
+    own1: { status: 'FAILED' },
+    early1: { status: () => { reads++; return new Response(JSON.stringify({ data: { status: 'SUCCEEDED' } }), { status: 200 }); }, items: [job(2)] },
+  });
+  if (/^Apify actor fixture\/actor finished with status FAILED$/.test(error?.message || '') && readUnread(dir) === before && reads === 0) {
+    pass('when this run\'s own actor fails, earlier lines are left as they are and not read');
+  } else {
+    fail(`own actor failed: error=${error?.message} reads=${reads} file=${JSON.stringify(readUnread(dir))}`);
+  }
+});
+
+await inTempDir(async (dir) => {
+  const prevCwd = process.cwd();
+  const prevFetch = globalThis.fetch;
+  const prevLog = console.log;
+  const prevWarn = console.warn;
+  console.log = () => {};
+  console.warn = () => {};
+  globalThis.fetch = stubRuns({ own1: { status: 'RUNNING' }, own2: { status: 'RUNNING' } });
+  process.chdir(dir);
+  let results;
+  try {
+    const ctx = { env: { APIFY_TOKEN: 'test-token' } };
+    results = await Promise.allSettled([
+      provider.fetch({ ...LINKEDIN, timeout_ms: GIVE_UP_MS }, ctx),
+      provider.fetch({ ...INDEED, timeout_ms: GIVE_UP_MS }, ctx),
+    ]);
+  } finally {
+    await sleep(20);
+    process.chdir(prevCwd);
+    globalThis.fetch = prevFetch;
+    console.log = prevLog;
+    console.warn = prevWarn;
+  }
+  const ids = unreadIds(dir).sort();
+  if (results.every(r => r.status === 'rejected') && JSON.stringify(ids) === '["own1","own2"]') {
+    pass('two entries given up on at the same time leave both lines');
+  } else {
+    fail(`two at once: results=${results.map(r => r.status)} ids=${JSON.stringify(ids)}`);
+  }
+});
+
+await inTempDir(async (dir) => {
+  writeUnread(dir, [
+    unreadLine(LINKEDIN, 'early1', new Date().toISOString()),
+    unreadLine(LINKEDIN, 'failed1', new Date().toISOString()),
+    unreadLine(INDEED, 'idxold', new Date(Date.now() - 8 * DAY_MS).toISOString()),
+  ]);
+  const before = readUnread(dir);
+  const { jobs, error } = await fetchEntry(dir, LINKEDIN, {
+    own1: { status: 'SUCCEEDED', items: [job(1)] },
+    early1: { status: 'SUCCEEDED', items: [job(2)] },
+    failed1: { status: 'FAILED' },
+  }, { dryRun: true });
+  const recovered = !error && urls(jobs) === urls([job(1), job(2)]);
+  const { error: gaveUp } = await fetchEntry(dir, givingUp, { own1: { status: 'RUNNING' } }, { dryRun: true });
+  if (recovered && gaveUp?.runId === 'own1' && readUnread(dir) === before) {
+    pass('a dry run reads earlier runs but leaves the file byte-identical, and records no run it gives up on');
+  } else {
+    fail(`dry run: recovered=${recovered} jobs=${urls(jobs)} gaveUp=${gaveUp?.message} file changed=${readUnread(dir) !== before}`);
+  }
+});
+
+await inTempDir(async (dir) => {
+  // Only an 8-day-old line of an entry no longer in use: one successful fetch of
+  // another entry, with nothing of its own to add or remove, prunes it.
+  writeUnread(dir, [unreadLine({ name: 'Retired feed', actor: 'fixture/retired' }, 'retired1', new Date(Date.now() - 8 * DAY_MS).toISOString())]);
+  const { jobs, error } = await fetchEntry(dir, LINKEDIN, { own1: { status: 'SUCCEEDED', items: [job(1)] } });
+  if (!error && urls(jobs) === urls([job(1)]) && readUnread(dir) === '') {
+    pass('a successful fetch with nothing of its own to change still prunes an 8-day-old line of another entry');
+  } else {
+    fail(`prune on a plain fetch: error=${error?.message} file=${JSON.stringify(readUnread(dir))}`);
+  }
+});
+
+await inTempDir(async (dir) => {
+  // A line with no readable time, or a run id Apify could not have issued, is
+  // dropped with one log line and never read; a good line beside it stays.
+  const good = unreadLine(INDEED, 'idx1', new Date().toISOString());
+  writeUnread(dir, [
+    unreadLine(LINKEDIN, 'notime1', 'yesterday'),
+    unreadLine(LINKEDIN, 'bad/id', new Date().toISOString()),
+    good,
+  ]);
+  let reads = 0;
+  const counted = (body) => () => { reads++; return new Response(JSON.stringify(body), { status: 200 }); };
+  const { jobs, error, logs } = await fetchEntry(dir, LINKEDIN, {
+    own1: { status: 'SUCCEEDED', items: [job(1)] },
+    notime1: { status: counted({ data: { status: 'SUCCEEDED' } }), items: [job(5)] },
+  });
+  const dropLogs = logs.filter(l => /dropped a malformed line/.test(l));
+  const second = await fetchEntry(dir, LINKEDIN, { own1: { status: 'SUCCEEDED', items: [job(1)] } });
+  const secondDropLogs = second.logs.filter(l => /malformed/.test(l));
+  if (!error && urls(jobs) === urls([job(1)]) && reads === 0 && dropLogs.length === 2 && readUnread(dir) === `${good}\n` && secondDropLogs.length === 0) {
+    pass('a line with an unreadable time or an invalid run id is dropped with one log line, once, and never read');
+  } else {
+    fail(`malformed lines: error=${error?.message} reads=${reads} logs=${JSON.stringify(dropLogs)} file=${JSON.stringify(readUnread(dir))} second=${JSON.stringify(secondDropLogs)}`);
+  }
+});

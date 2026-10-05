@@ -683,7 +683,7 @@ export function filterResultsForId(results, id) {
  *     the plugin off yields a helpful error, not a confusing "unknown provider".
  *
  * @param {Map<string, any>} providersMap   The Map returned by scan.mjs loadProviders.
- * @param {{ root: string }} opts
+ * @param {{ root: string, dryRun?: boolean }} opts   dryRun reaches each plugin as ctx.dryRun.
  */
 // A detect-exempt provider whose fetch throws an actionable message — used when
 // a known provider plugin is inactive (disabled / missing key / failed import)
@@ -696,7 +696,7 @@ function inactiveProviderStub(id, reason) {
   };
 }
 
-export async function mergeProviderPlugins(providersMap, { root }) {
+export async function mergeProviderPlugins(providersMap, { root, dryRun = false }) {
   if (!existsSync(pluginsConfigPath(root))) return; // (1) opted out → inert (no work, no env read)
 
   // Everything past the opt-out gate is wrapped so an UNANTICIPATED throw
@@ -734,7 +734,7 @@ export async function mergeProviderPlugins(providersMap, { root }) {
         providersMap.set(manifest.id, inactiveProviderStub(manifest.id, 'failed to load — see ⚠️ above'));
         continue;
       }
-      const ctx = buildCtx(manifest, { settings: pluginSettings(manifest.id, cfg) });
+      const ctx = buildCtx(manifest, { dryRun, settings: pluginSettings(manifest.id, cfg) });
       providersMap.set(manifest.id, {
         id: manifest.id,
         detect: () => null, // (4) keyed providers never auto-detect

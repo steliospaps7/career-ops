@@ -183,7 +183,10 @@ async function waitForRun(runId, token, deadline, timeoutMs) {
   void abortRun(runId, token).catch(() => {});
   const status = lastStatus ? `status ${lastStatus}` : 'status unknown';
   const suffix = lastError ? `, last error: ${lastError.message}` : '';
-  throw new Error(`Apify run ${runId} did not finish within ${Math.round(timeoutMs / 1000)}s (${status}${suffix})`);
+  const err = new Error(`Apify run ${runId} did not finish within ${Math.round(timeoutMs / 1000)}s (${status}${suffix})`);
+  // The run id travels as data, so the plugin can read the run at a later scan.
+  err.runId = runId;
+  throw err;
 }
 
 async function fetchDatasetItems(runId, token, deadline = null) {
@@ -219,5 +222,46 @@ export async function runActor(actorId, input, { timeoutMs = DEFAULT_RUN_TIMEOUT
   // finished near or after the deadline would otherwise be lost, since
   // fetchJson refuses to send anything once the deadline has passed.
   const datasetDeadline = Math.max(deadline, Date.now() + LATE_DATASET_READ_MS);
-  return await fetchDatasetItems(runId, token, datasetDeadline);
+  try {
+    return await fetchDatasetItems(runId, token, datasetDeadline);
+  } catch (err) {
+    // The run finished but its items were not read: pass the run id on as data.
+    if (err && typeof err === 'object') err.runId = runId;
+    throw err;
+  }
+}
+
+// Reading an earlier run, one the plugin gave up on at a previous scan. Kept
+// apart from waitForRun: one status read, no polling, no abort.
+const RUN_ID_RE = /^[A-Za-z0-9]+$/;
+
+export function isValidRunId(runId) {
+  return typeof runId === 'string' && RUN_ID_RE.test(runId);
+}
+
+function checkRunId(runId) {
+  if (!isValidRunId(runId)) {
+    throw new Error(`apify: invalid run id ${JSON.stringify(runId)}`);
+  }
+}
+
+// One request with its own 15 s timeout. Returns the run record ({ status, ... }).
+export async function readRunStatus(runId, token) {
+  checkRunId(runId);
+  const body = await fetchJsonOnce(
+    `${APIFY_API_BASE}/actor-runs/${runId}`,
+    { headers: authHeaders(token) },
+    PER_REQUEST_TIMEOUT_MS,
+  );
+  const run = body?.data;
+  if (!run || typeof run !== 'object') {
+    throw new Error(`Apify run ${runId} returned no run record`);
+  }
+  return run;
+}
+
+// The run's dataset, with LATE_DATASET_READ_MS for the whole read.
+export async function readRunItems(runId, token) {
+  checkRunId(runId);
+  return await fetchDatasetItems(runId, token, Date.now() + LATE_DATASET_READ_MS);
 }
