@@ -610,6 +610,8 @@ for (const [label, run] of [
   ['RUNNING', { status: 'RUNNING' }],
   ['a network error', { status: networkDown }],
   ['a failed dataset read', { status: 'SUCCEEDED', items: http(503, 'busy') }],
+  ['a 404 on the dataset read after SUCCEEDED', { status: 'SUCCEEDED', items: http(404, 'dataset not found') }],
+  ['a 403 on the status read', { status: http(403, 'forbidden') }],
 ]) {
   await inTempDir(async (dir) => {
     writeUnread(dir, [unreadLine(LINKEDIN, 'early1', new Date().toISOString())]);
@@ -727,5 +729,42 @@ await inTempDir(async (dir) => {
     pass('a dry run reads earlier runs but leaves the file byte-identical, and records no run it gives up on');
   } else {
     fail(`dry run: recovered=${recovered} jobs=${urls(jobs)} gaveUp=${gaveUp?.message} file changed=${readUnread(dir) !== before}`);
+  }
+});
+
+await inTempDir(async (dir) => {
+  // Only an 8-day-old line of an entry no longer in use: one successful fetch of
+  // another entry, with nothing of its own to add or remove, prunes it.
+  writeUnread(dir, [unreadLine({ name: 'Retired feed', actor: 'fixture/retired' }, 'retired1', new Date(Date.now() - 8 * DAY_MS).toISOString())]);
+  const { jobs, error } = await fetchEntry(dir, LINKEDIN, { own1: { status: 'SUCCEEDED', items: [job(1)] } });
+  if (!error && urls(jobs) === urls([job(1)]) && readUnread(dir) === '') {
+    pass('a successful fetch with nothing of its own to change still prunes an 8-day-old line of another entry');
+  } else {
+    fail(`prune on a plain fetch: error=${error?.message} file=${JSON.stringify(readUnread(dir))}`);
+  }
+});
+
+await inTempDir(async (dir) => {
+  // A line with no readable time, or a run id Apify could not have issued, is
+  // dropped with one log line and never read; a good line beside it stays.
+  const good = unreadLine(INDEED, 'idx1', new Date().toISOString());
+  writeUnread(dir, [
+    unreadLine(LINKEDIN, 'notime1', 'yesterday'),
+    unreadLine(LINKEDIN, 'bad/id', new Date().toISOString()),
+    good,
+  ]);
+  let reads = 0;
+  const counted = (body) => () => { reads++; return new Response(JSON.stringify(body), { status: 200 }); };
+  const { jobs, error, logs } = await fetchEntry(dir, LINKEDIN, {
+    own1: { status: 'SUCCEEDED', items: [job(1)] },
+    notime1: { status: counted({ data: { status: 'SUCCEEDED' } }), items: [job(5)] },
+  });
+  const dropLogs = logs.filter(l => /dropped a malformed line/.test(l));
+  const second = await fetchEntry(dir, LINKEDIN, { own1: { status: 'SUCCEEDED', items: [job(1)] } });
+  const secondDropLogs = second.logs.filter(l => /malformed/.test(l));
+  if (!error && urls(jobs) === urls([job(1)]) && reads === 0 && dropLogs.length === 2 && readUnread(dir) === `${good}\n` && secondDropLogs.length === 0) {
+    pass('a line with an unreadable time or an invalid run id is dropped with one log line, once, and never read');
+  } else {
+    fail(`malformed lines: error=${error?.message} reads=${reads} logs=${JSON.stringify(dropLogs)} file=${JSON.stringify(readUnread(dir))} second=${JSON.stringify(secondDropLogs)}`);
   }
 });

@@ -36,6 +36,7 @@ These files contain your personal data, customizations, and work product. Update
 | `data/scan-runs.tsv` | Your per-run scan counters (appended by `scan.mjs`, read by `stats.mjs`) |
 | `data/portal-health.tsv` | Consecutive reachability status for scanned portals (appended by `scan.mjs`; statuses: `reachable`, `empty`, `slug_gone`, `network`, `auth`, `server`, `unknown` — the last three joined the vocabulary later, so older files carry only the first four) |
 | `data/dead-boards.tsv` | Boards that returned three consecutive 404s during mass reverse ATS sweeps (written by `scan-ats-full.mjs`; unlike `data/portal-health.tsv`, this does not track the user's configured portals; re-probed after 30 days — safe to delete, the next sweep rebuilds it) |
+| `data/apify-unread-runs.tsv` | Apify runs the plugin gave up on (the wait ran out, or the items could not be read) and reads at the next successful scan of the same entry (written by `plugins/apify/index.mjs`; tab-separated: entry name, actor, run id, time recorded in ISO UTC; lines 7 days old or more are dropped, since Apify keeps a run's items 7 days — safe to delete, only those runs' items are lost) |
 | `data/follow-ups.md` | Your follow-up history |
 | `data/active-interviews.md` | Your active interview processes, incl. inline `[process-friction]` notes (read by `process-quality.mjs`) |
 | `data/agent-inbox.md` | Your append-only request queue drained at session start (written by `agent-inbox.mjs`) |

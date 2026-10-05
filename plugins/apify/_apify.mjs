@@ -235,8 +235,12 @@ export async function runActor(actorId, input, { timeoutMs = DEFAULT_RUN_TIMEOUT
 // apart from waitForRun: one status read, no polling, no abort.
 const RUN_ID_RE = /^[A-Za-z0-9]+$/;
 
+export function isValidRunId(runId) {
+  return typeof runId === 'string' && RUN_ID_RE.test(runId);
+}
+
 function checkRunId(runId) {
-  if (typeof runId !== 'string' || !RUN_ID_RE.test(runId)) {
+  if (!isValidRunId(runId)) {
     throw new Error(`apify: invalid run id ${JSON.stringify(runId)}`);
   }
 }

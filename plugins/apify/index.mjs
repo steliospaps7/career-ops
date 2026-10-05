@@ -29,7 +29,7 @@
 import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync } from 'fs';
 import { createHash } from 'crypto';
 import { join, dirname } from 'path';
-import { hasToken, runActor, readRunStatus, readRunItems } from './_apify.mjs';
+import { hasToken, runActor, readRunStatus, readRunItems, isValidRunId } from './_apify.mjs';
 
 const JDS_DIR = 'jds';
 const MIN_JD_BODY_CHARS = 50;
@@ -217,6 +217,12 @@ function parseUnreadLine(line) {
   return { name, actor, runId, recordedAt };
 }
 
+// A line with no readable time or no valid run id can never be read or aged
+// out, so it is dropped.
+function isMalformedUnread(r) {
+  return !Number.isFinite(Date.parse(r.recordedAt)) || !isValidRunId(r.runId);
+}
+
 function isStaleUnread(recordedAt, now) {
   const t = Date.parse(recordedAt);
   return Number.isFinite(t) && now - t >= UNREAD_MAX_AGE_MS;
@@ -233,15 +239,19 @@ function readUnreadText() {
 
 // One synchronous step with no await inside, so two feeds fetching at the same
 // time can never interleave here: re-read the file, drop every line 7 days old
-// or more whatever its entry, apply only this fetch's own additions and
-// removals by run id, then write a temp file and rename it over the old one.
-// Writes only when a line changes.
+// or more whatever its entry and every malformed line (one log line each),
+// apply only this fetch's own additions and removals by run id, then write a
+// temp file and rename it over the old one. Writes only when a line changes.
 function updateUnreadRuns(additions, removeIds) {
-  if (additions.length === 0 && removeIds.size === 0) return;
   const before = readUnreadText();
+  if (before === '' && additions.length === 0) return;
   const now = Date.now();
   const lines = before.split('\n').filter(l => l.trim() !== '').filter(l => {
     const r = parseUnreadLine(l);
+    if (isMalformedUnread(r)) {
+      console.log(`apify: dropped a malformed line in ${UNREAD_RUNS_FILE}: ${JSON.stringify(l)}`);
+      return false;
+    }
     return !isStaleUnread(r.recordedAt, now) && !removeIds.has(r.runId);
   });
   const ids = new Set(lines.map(l => parseUnreadLine(l).runId));
@@ -274,6 +284,8 @@ async function readEarlierRuns(entry, token) {
   }
   const now = Date.now();
   for (const r of lines) {
+    // A malformed line is dropped, with its log line, by the next write.
+    if (isMalformedUnread(r)) continue;
     if (r.actor !== String(entry.actor)) {
       removeIds.add(r.runId);
       console.log(`apify: ${entry.name}: dropped earlier run ${r.runId} (actor ${r.actor}, the entry now uses ${entry.actor})`);
@@ -284,26 +296,34 @@ async function readEarlierRuns(entry, token) {
       console.log(`apify: ${entry.name}: dropped earlier run ${r.runId} (recorded ${r.recordedAt}, 7 days or more ago)`);
       continue;
     }
+    let run;
     try {
-      const run = await readRunStatus(r.runId, token);
-      if (run.status === 'SUCCEEDED') {
-        const runItems = await readRunItems(r.runId, token);
-        items.push(...runItems);
-        removeIds.add(r.runId);
-        console.log(`apify: ${entry.name}: read ${runItems.length} items from earlier run ${r.runId} (recorded ${r.recordedAt})`);
-      } else if (UNREAD_DROP_STATUSES.has(run.status)) {
-        removeIds.add(r.runId);
-        console.log(`apify: ${entry.name}: dropped earlier run ${r.runId} (status ${run.status})`);
-      } else {
-        console.log(`apify: ${entry.name}: earlier run ${r.runId} not read (status ${run.status}); kept for the next scan`);
-      }
+      run = await readRunStatus(r.runId, token);
     } catch (err) {
+      // Only a 404 on the status read means the run is gone; any other error keeps the line.
       if (err?.status === 404) {
         removeIds.add(r.runId);
         console.warn(`apify: ${entry.name}: dropped earlier run ${r.runId} (${err.message})`);
       } else {
         console.warn(`apify: ${entry.name}: earlier run ${r.runId} not read (${err?.message}); kept for the next scan`);
       }
+      continue;
+    }
+    if (run.status === 'SUCCEEDED') {
+      try {
+        const runItems = await readRunItems(r.runId, token);
+        items.push(...runItems);
+        removeIds.add(r.runId);
+        console.log(`apify: ${entry.name}: read ${runItems.length} items from earlier run ${r.runId} (recorded ${r.recordedAt})`);
+      } catch (err) {
+        // A failed dataset read, a 404 included, keeps the line.
+        console.warn(`apify: ${entry.name}: items of earlier run ${r.runId} not read (${err?.message}); kept for the next scan`);
+      }
+    } else if (UNREAD_DROP_STATUSES.has(run.status)) {
+      removeIds.add(r.runId);
+      console.log(`apify: ${entry.name}: dropped earlier run ${r.runId} (status ${run.status})`);
+    } else {
+      console.log(`apify: ${entry.name}: earlier run ${r.runId} not read (status ${run.status}); kept for the next scan`);
     }
   }
   return { items, removeIds };
@@ -364,7 +384,8 @@ export default {
 
       const earlier = await readEarlierRuns(entry, token);
       if (earlier.items.length) items = items.concat(earlier.items);
-      if (earlier.removeIds.size && !dryRun) {
+      // Every successful fetch also prunes lines 7 days old or more, whatever their entry.
+      if (!dryRun) {
         try {
           updateUnreadRuns([], earlier.removeIds);
         } catch (err) {
