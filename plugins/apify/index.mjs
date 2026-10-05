@@ -26,13 +26,22 @@
 //         company:  [company, companyName]
 //         location: [location, formattedLocation]
 
-import { mkdirSync, writeFileSync, existsSync } from 'fs';
+import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync } from 'fs';
 import { createHash } from 'crypto';
-import { join } from 'path';
-import { hasToken, runActor } from './_apify.mjs';
+import { join, dirname } from 'path';
+import { hasToken, runActor, readRunStatus, readRunItems } from './_apify.mjs';
 
 const JDS_DIR = 'jds';
 const MIN_JD_BODY_CHARS = 50;
+
+// Runs this plugin gave up on (the Mac slept through the wait, or the dataset
+// read failed) and reads at the next scan of the same entry. One line per run:
+// entry name, actor, run id, time recorded (ISO UTC), tab-separated. Resolved
+// against the same folder as jds/, so data/ and jds/ are siblings.
+const UNREAD_RUNS_FILE = join('data', 'apify-unread-runs.tsv');
+// Apify keeps an unnamed dataset for 7 days.
+const UNREAD_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const UNREAD_DROP_STATUSES = new Set(['FAILED', 'ABORTED', 'TIMED-OUT']);
 
 function getPath(obj, p) {
   return p.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
@@ -199,6 +208,107 @@ export function normalizeItem(item, fieldMap, defaults) {
   return out;
 }
 
+function tsvField(value) {
+  return String(value ?? '').replace(/[\t\r\n]+/g, ' ').trim();
+}
+
+function parseUnreadLine(line) {
+  const [name = '', actor = '', runId = '', recordedAt = ''] = line.split('\t');
+  return { name, actor, runId, recordedAt };
+}
+
+function isStaleUnread(recordedAt, now) {
+  const t = Date.parse(recordedAt);
+  return Number.isFinite(t) && now - t >= UNREAD_MAX_AGE_MS;
+}
+
+function readUnreadText() {
+  try {
+    return readFileSync(UNREAD_RUNS_FILE, 'utf-8');
+  } catch (err) {
+    if (err?.code === 'ENOENT') return '';
+    throw err;
+  }
+}
+
+// One synchronous step with no await inside, so two feeds fetching at the same
+// time can never interleave here: re-read the file, drop every line 7 days old
+// or more whatever its entry, apply only this fetch's own additions and
+// removals by run id, then write a temp file and rename it over the old one.
+// Writes only when a line changes.
+function updateUnreadRuns(additions, removeIds) {
+  if (additions.length === 0 && removeIds.size === 0) return;
+  const before = readUnreadText();
+  const now = Date.now();
+  const lines = before.split('\n').filter(l => l.trim() !== '').filter(l => {
+    const r = parseUnreadLine(l);
+    return !isStaleUnread(r.recordedAt, now) && !removeIds.has(r.runId);
+  });
+  const ids = new Set(lines.map(l => parseUnreadLine(l).runId));
+  for (const r of additions) {
+    if (ids.has(r.runId)) continue;
+    lines.push([r.name, r.actor, r.runId, r.recordedAt].map(tsvField).join('\t'));
+    ids.add(r.runId);
+  }
+  const after = lines.length ? `${lines.join('\n')}\n` : '';
+  if (after === before) return;
+  mkdirSync(dirname(UNREAD_RUNS_FILE), { recursive: true });
+  const tmp = `${UNREAD_RUNS_FILE}.${process.pid}.tmp`;
+  writeFileSync(tmp, after, 'utf-8');
+  renameSync(tmp, UNREAD_RUNS_FILE);
+}
+
+// Read this entry's earlier runs. Returns their items and the run ids whose
+// lines can go. Never throws: an error on an earlier run is one log line, and
+// the line stays for the next scan unless the run is gone for good.
+async function readEarlierRuns(entry, token) {
+  const items = [];
+  const removeIds = new Set();
+  let lines;
+  try {
+    const name = tsvField(entry.name);
+    lines = readUnreadText().split('\n').filter(l => l.trim() !== '').map(parseUnreadLine).filter(r => r.name === name);
+  } catch (err) {
+    console.warn(`apify: ${entry.name}: could not read ${UNREAD_RUNS_FILE} (${err.code || err.name}: ${err.message}); earlier runs not read`);
+    return { items, removeIds };
+  }
+  const now = Date.now();
+  for (const r of lines) {
+    if (r.actor !== String(entry.actor)) {
+      removeIds.add(r.runId);
+      console.log(`apify: ${entry.name}: dropped earlier run ${r.runId} (actor ${r.actor}, the entry now uses ${entry.actor})`);
+      continue;
+    }
+    if (isStaleUnread(r.recordedAt, now)) {
+      removeIds.add(r.runId);
+      console.log(`apify: ${entry.name}: dropped earlier run ${r.runId} (recorded ${r.recordedAt}, 7 days or more ago)`);
+      continue;
+    }
+    try {
+      const run = await readRunStatus(r.runId, token);
+      if (run.status === 'SUCCEEDED') {
+        const runItems = await readRunItems(r.runId, token);
+        items.push(...runItems);
+        removeIds.add(r.runId);
+        console.log(`apify: ${entry.name}: read ${runItems.length} items from earlier run ${r.runId} (recorded ${r.recordedAt})`);
+      } else if (UNREAD_DROP_STATUSES.has(run.status)) {
+        removeIds.add(r.runId);
+        console.log(`apify: ${entry.name}: dropped earlier run ${r.runId} (status ${run.status})`);
+      } else {
+        console.log(`apify: ${entry.name}: earlier run ${r.runId} not read (status ${run.status}); kept for the next scan`);
+      }
+    } catch (err) {
+      if (err?.status === 404) {
+        removeIds.add(r.runId);
+        console.warn(`apify: ${entry.name}: dropped earlier run ${r.runId} (${err.message})`);
+      } else {
+        console.warn(`apify: ${entry.name}: earlier run ${r.runId} not read (${err?.message}); kept for the next scan`);
+      }
+    }
+  }
+  return { items, removeIds };
+}
+
 /** The keyed provider hook. Reads APIFY_TOKEN from the plugin's scoped ctx.env. */
 export default {
   provider: {
@@ -231,7 +341,36 @@ export default {
 
       const opts = { token };
       if (entry.timeout_ms != null) opts.timeoutMs = entry.timeout_ms;
-      const items = await runActor(entry.actor, entry.input || {}, opts);
+      // A dry run reads earlier runs but never adds or removes a line.
+      const dryRun = ctx?.dryRun === true;
+      let items;
+      try {
+        items = await runActor(entry.actor, entry.input || {}, opts);
+      } catch (err) {
+        // A run given up on, or finished with its items unread: record it so the
+        // next scan of this entry reads it. The feed still reports this error.
+        if (err?.runId && !dryRun) {
+          try {
+            updateUnreadRuns(
+              [{ name: entry.name, actor: entry.actor, runId: err.runId, recordedAt: new Date().toISOString() }],
+              new Set(),
+            );
+          } catch (recordErr) {
+            console.warn(`apify: ${entry.name}: could not record run ${err.runId} in ${UNREAD_RUNS_FILE} (${recordErr.code || recordErr.name}: ${recordErr.message})`);
+          }
+        }
+        throw err;
+      }
+
+      const earlier = await readEarlierRuns(entry, token);
+      if (earlier.items.length) items = items.concat(earlier.items);
+      if (earlier.removeIds.size && !dryRun) {
+        try {
+          updateUnreadRuns([], earlier.removeIds);
+        } catch (err) {
+          console.warn(`apify: ${entry.name}: could not update ${UNREAD_RUNS_FILE} (${err.code || err.name}: ${err.message})`);
+        }
+      }
 
       const useLocalJd = entry.field_map.description != null;
       const sourceLabel = String(entry.actor || 'apify').replace(/[^a-z0-9]+/gi, '-').toLowerCase();

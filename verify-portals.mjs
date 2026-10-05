@@ -782,7 +782,8 @@ async function main() {
   // plugin-free install (mergeProviderPlugins returns before config/plugins.yml
   // is read when it is absent).
   const { mergeProviderPlugins } = await import('./plugins/_engine.mjs');
-  await mergeProviderPlugins(providers, { root: dirname(PROVIDERS_DIR) });
+  // dryRun: this check calls every entry's fetch and must not change a plugin's files.
+  await mergeProviderPlugins(providers, { root: dirname(PROVIDERS_DIR), dryRun: true });
   const httpCtx = makeHttpCtx();
   const { found, results } = await verifyPortalsFile(filePath, { fetchJson, providers, httpCtx });
   if (!found) {
