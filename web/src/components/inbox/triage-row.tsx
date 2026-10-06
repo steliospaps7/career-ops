@@ -85,7 +85,7 @@ export function TriageRow({
         {job.url && (
           <p className="mt-0.5 break-all text-[11px] text-faint">
             {linkHref ? (
-              <a href={linkHref} target="_blank" rel="noopener noreferrer" className="text-muted hover:underline">
+              <a href={linkHref} target="_blank" rel="noopener noreferrer" className="text-brand-text hover:underline">
                 {job.url}
               </a>
             ) : (
