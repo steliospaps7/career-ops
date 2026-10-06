@@ -23,6 +23,7 @@ import { markTrackedInbox } from "./inbox-tracked.mjs";
 import { orderInboxByScan } from "./inbox-order.mjs";
 import { markHiddenInbox } from "./inbox-hidden.mjs";
 import { readHiddenFile } from "./inbox-hidden-file.mjs";
+import { isReservedReportFile } from "./report-files.mjs";
 
 function readText(root, rel) {
   try {
@@ -72,8 +73,10 @@ export function readScanDates(root) {
 /** The composition the Inbox shows: the scan date joined on, newest scan first,
  *  one row per URL, a row the tracker holds marked done with its tracker row,
  *  and a row hidden with X marked done with its time. The tracker wins when a
- *  row is both. */
-export function composeInbox(jobs, scanDates, applications, hiddenEntries = []) {
+ *  row is both. `readReport` reads a report a tracker row links, so a row
+ *  whose advert's posting id matches the report's URL is hidden too
+ *  (inbox-tracked.mjs). */
+export function composeInbox(jobs, scanDates, applications, hiddenEntries = [], readReport) {
   return markHiddenInbox(
     markTrackedInbox(
       orderInboxByScan(
@@ -81,6 +84,7 @@ export function composeInbox(jobs, scanDates, applications, hiddenEntries = []) 
         scanDates,
       ),
       applications,
+      readReport,
     ),
     hiddenEntries,
   );
@@ -101,7 +105,36 @@ export function readInboxSummary(root) {
   } catch {
     /* shown as if nothing were hidden */
   }
-  return { jobs, applications, hiddenEntries, inbox: composeInbox(jobs, readScanDates(root), applications, hiddenEntries) };
+  return { jobs, applications, hiddenEntries, inbox: composeInbox(jobs, readScanDates(root), applications, hiddenEntries, reportReader(root)) };
+}
+
+/** Read a report a tracker row links, as findReportFile in career-ops.ts does:
+ *  the link is relative to data/, where the tracker lives; a link that resolves
+ *  outside the career-ops root (symlinks followed) and a NNN-RESERVED.md
+ *  placeholder are not read. */
+export function reportReader(root) {
+  let realRoot;
+  try {
+    realRoot = fs.realpathSync(root);
+  } catch {
+    return () => null;
+  }
+  return (rel) => {
+    const p = path.resolve(root, "data", rel);
+    if (!p.endsWith(".md") || isReservedReportFile(p)) return null;
+    let real;
+    try {
+      real = fs.realpathSync(p);
+    } catch {
+      return null;
+    }
+    if (!real.startsWith(realRoot + path.sep)) return null;
+    try {
+      return fs.readFileSync(real, "utf8");
+    } catch {
+      return null;
+    }
+  };
 }
 
 /**
