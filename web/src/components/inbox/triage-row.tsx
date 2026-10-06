@@ -6,6 +6,7 @@ import type { InboxJob } from "@/lib/career-ops";
 import type { AtsSource } from "@/lib/explore";
 import { ATS_LABEL } from "@/lib/explore";
 import { fitCardLine } from "@/lib/inbox-line.mjs";
+import { inboxLinkHref } from "@/lib/inbox-link.mjs";
 import { scanDateMark } from "@/lib/inbox-order.mjs";
 import { Badge } from "@/components/ui/badge";
 import { CompanyLogo } from "@/components/company-logo";
@@ -53,6 +54,8 @@ export function TriageRow({
   const fitLine = fitCardLine(job);
   // A row the scan history never dated sorts to the bottom; this says why.
   const noScanDate = scanDateMark(job);
+  // The advert URL as a link only when it is http(s); anything else stays plain text.
+  const linkHref = inboxLinkHref(job.url);
 
   return (
     <li
@@ -78,6 +81,18 @@ export function TriageRow({
           <span className="font-medium text-foreground">{job.company}</span>
           <span className="text-muted"> · {job.role}</span>
         </p>
+        {/* The advert's full URL as stored, wrapping rather than cut; a link only for http(s). */}
+        {job.url && (
+          <p className="mt-0.5 break-all text-[11px] text-faint">
+            {linkHref ? (
+              <a href={linkHref} target="_blank" rel="noopener noreferrer" className="text-muted hover:underline">
+                {job.url}
+              </a>
+            ) : (
+              job.url
+            )}
+          </p>
+        )}
         <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-faint">
           {job.location && <span className="truncate">{job.location}</span>}
           {source && <span className="rounded bg-surface-hover px-1 py-px font-medium text-muted">{ATS_LABEL[source]}</span>}
