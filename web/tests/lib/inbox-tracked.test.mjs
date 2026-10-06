@@ -8,7 +8,8 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { parseInboxLine } from "../../src/lib/inbox-line.mjs";
 import { parseApplications } from "../../src/lib/tracker-table.mjs";
-import { markTrackedInbox, postingId } from "../../src/lib/inbox-tracked.mjs";
+import { markTrackedInbox, postingId, reportUrl } from "../../src/lib/inbox-tracked.mjs";
+import { resolveAtsApi } from "../../../liveness-api.mjs";
 
 // The fork root, where the tracker parser finds tracker-aliases.json.
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
@@ -155,4 +156,74 @@ test("postingId reads each board's own id and nothing else", () => {
   assert.equal(postingId("https://apply.workable.com/starling-bank/j/582C64B37F/"), "workable:582C64B37F");
   assert.equal(postingId("https://www.welcometothejungle.com/en/companies/lendable/jobs/senior-product-manager_arlington_dkw7hk5t"), "wttj:dkw7hk5t");
   for (const u of ["https://octopus.energy/careers/join-us/466ac356/", "local:jds/acme-pm-1a2b.md", "", undefined]) assert.equal(postingId(u), null, String(u));
+});
+
+test("review 1: the advert's own tracker row wins over an older row of the same company and title", () => {
+  const tracker =
+    "| # | Date | Company | Via | Role | Score | Status | PDF | Report | Notes |\n|---|---|---|---|---|---|---|---|---|---|\n" +
+    "| 120 | 2026-09-10 | Bridebook - The No.1 Wedding Planning App | — | Performance Marketing Associate | 3.0/5 | SKIP | ❌ | - | an older advert |\n" +
+    "| 338 | 2026-10-05 | Bridebook | — | Performance Marketing Associate | 2.4/5 | Evaluated | ❌ | [338](../reports/338-bridebook-2026-10-05.md) | x |\n";
+  const { read } = reports({ "../reports/338-bridebook-2026-10-05.md": BRIDEBOOK_REPORT });
+  const [out] = markTrackedInbox([parseInboxLine(BRIDEBOOK_LINE)], parseApplications(tracker, ROOT), read);
+  assert.deepEqual(out.tracked, { n: "338", status: "Evaluated", date: "2026-10-05" });
+});
+
+test("review 4: two tracker rows linking one report read it once", () => {
+  const tracker = BRIDEBOOK_TRACKER + "| 341 | 2026-10-06 | Bridebook | — | Paid Social Associate | 2.4/5 | Evaluated | ❌ | [338](../reports/338-bridebook-2026-10-05.md) | same report |\n";
+  const { read, reads } = reports({ "../reports/338-bridebook-2026-10-05.md": BRIDEBOOK_REPORT });
+  const [out] = markTrackedInbox([parseInboxLine(BRIDEBOOK_LINE)], parseApplications(tracker, ROOT), read);
+  assert.equal(out.tracked.n, "338", "the first row with the id wins");
+  assert.deepEqual(reads, ["../reports/338-bridebook-2026-10-05.md"]);
+});
+
+// LinkedIn URL shapes, each with the id it carries.
+const LINKEDIN = [
+  ["https://uk.linkedin.com/jobs/view/growth-lead-at-zinc-4475590501?position=25&pageNum=0", "4475590501"],
+  ["https://www.linkedin.com/jobs/view/4475590501/", "4475590501"],
+  ["https://www.linkedin.com/jobs/view/12345", "12345"],
+  ["https://www.linkedin.com/jobs/search/?currentJobId=4475542689&keywords=growth", "4475542689"],
+  ["https://www.linkedin.com/jobs/collections/recommended/?currentJobId=4475542689", "4475542689"],
+  ["https://www.linkedin.com/feed/", null],
+  ["https://www.linkedin.com/jobs/search/?currentJobId=abc", null],
+  ["https://notlinkedin.com/jobs/view/4475590501", null],
+];
+
+test("review 2: postingId reads every LinkedIn shape", () => {
+  for (const [u, id] of LINKEDIN) assert.equal(postingId(u), id && `linkedin:${id}`, u);
+  assert.equal(postingId("https://www.linkedin.com/comm/jobs/view/4475590501/?trackingId=x"), "linkedin:4475590501", "the email link");
+});
+
+test("review 2: postingId's LinkedIn ids equal liveness-api.mjs's match (web/AGENTS.md rule 1)", () => {
+  for (const [u] of LINKEDIN) {
+    const live = resolveAtsApi(u);
+    assert.equal(postingId(u), live?.ats === "linkedin" ? `linkedin:${live.parts.id}` : null, u);
+  }
+  // The one shape liveness-api.mjs does not read: /comm/jobs/view/, from LinkedIn's emails.
+  assert.equal(resolveAtsApi("https://www.linkedin.com/comm/jobs/view/4475590501/"), null);
+});
+
+test("review 2: Ashby on the employer's own site, Workable with no account, jobs.workable.com left alone", () => {
+  assert.equal(postingId("https://www.getmoss.com/careers/open-positions?ashby_jid=52EA8F7C-c4e7-49bb-a45f-468fe41c2728&utm_source=x"), "ashby:52ea8f7c-c4e7-49bb-a45f-468fe41c2728");
+  assert.equal(postingId("https://jobs.ashbyhq.com/rogo/52ea8f7c-c4e7-49bb-a45f-468fe41c2728/application"), "ashby:52ea8f7c-c4e7-49bb-a45f-468fe41c2728");
+  assert.equal(postingId("https://apply.workable.com/j/582C64B37F"), "workable:582C64B37F");
+  assert.equal(postingId("https://apply.workable.com/starling-bank/j/582c64b37f/apply/"), "workable:582C64B37F");
+  assert.equal(postingId("https://jobs.workable.com/view/1a2b3c4d5e/product-manager-in-london-at-acme"), null);
+  assert.equal(postingId("https://example.com/careers?gh_jid=8604164002"), "greenhouse:8604164002");
+});
+
+test("review 3: reportUrl reads the URL line in every shape reports use", () => {
+  const U = "https://jobs.lever.co/zopa/5e422360-db37-45f8-af32-02e757d27020";
+  for (const line of [
+    `**URL:** ${U}`,
+    `URL: ${U}`,
+    `**URL**: ${U}`,
+    `**URL :** ${U}`,
+    `URL : ${U}`,
+    `**URL:** <${U}>`,
+    `**URL:** ${U}).`,
+    `**URL:** ${U},`,
+    `**URL:** ${U}]`,
+  ]) assert.equal(reportUrl(`# Evaluation\n\n**Date:** 2026-10-05\n${line}\n**Score:** 3/5\n`), U, line);
+  assert.equal(reportUrl("# Evaluation\n\n**Date:** 2026-10-05\n"), null);
+  assert.equal(reportUrl(null), null);
 });

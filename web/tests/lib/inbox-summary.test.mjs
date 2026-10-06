@@ -161,3 +161,24 @@ test("6 October: a row the tracker holds under another company name is hidden th
   });
   assert.equal(countInbox(jobs, inbox).hidden.length, 4);
 });
+
+test("review 4: a report link outside the career-ops root and a RESERVED placeholder are not read", () => {
+  const BRIDEBOOK = "https://uk.linkedin.com/jobs/view/performance-marketing-associate-at-bridebook-the-no-1-wedding-planning-app-4475542689";
+  const pipeline = PIPELINE.replace("\n## Processed", `- [ ] ${BRIDEBOOK} | Bridebook - The No.1 Wedding Planning App | Performance Marketing Associate | London\n\n## Processed`);
+  const report = `# Evaluation: Bridebook\n\n**URL:** ${BRIDEBOOK}\n`;
+  // The same report text, once in another temporary folder linked by ../../ from
+  // data/, once under reports/ with a placeholder's name.
+  const outside = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "inbox-summary-outside-")), "338-bridebook.md");
+  fs.writeFileSync(outside, report);
+  for (const placeholder of [false, true]) {
+    const root = dataFolder({ pipeline, tracker: TRACKER });
+    const link = placeholder ? "../reports/338-RESERVED.md" : path.relative(path.join(root, "data"), outside);
+    if (placeholder) {
+      fs.mkdirSync(path.join(root, "reports"));
+      fs.writeFileSync(path.join(root, "reports/338-RESERVED.md"), report);
+    } else assert.match(link, /^\.\.\/\.\.\//);
+    fs.writeFileSync(path.join(root, "data/applications.md"), TRACKER + `| 338 | 2026-10-05 | Bridebook | — | Performance Marketing Associate | 2.4/5 | Evaluated | ❌ | [338](${link}) | x |\n`);
+    const { inbox } = readInboxSummary(root);
+    assert.equal(inboxFate(inbox, BRIDEBOOK).shown, true, link);
+  }
+});
