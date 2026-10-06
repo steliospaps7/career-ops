@@ -144,3 +144,20 @@ test("node inbox-summary.mjs prints the three counts and each hidden row's track
   assert.match(out, /^Repeat lines of a URL already listed: 1$/m);
   assert.match(out, /^Shown in the Inbox: 1$/m);
 });
+
+test("6 October: a row the tracker holds under another company name is hidden through its report's URL", () => {
+  const BRIDEBOOK = "https://uk.linkedin.com/jobs/view/performance-marketing-associate-at-bridebook-the-no-1-wedding-planning-app-4475542689?position=17&pageNum=0";
+  const pipeline = PIPELINE.replace("\n## Processed", `- [ ] ${BRIDEBOOK} | Bridebook - The No.1 Wedding Planning App | Performance Marketing Associate | London Area, United Kingdom\n\n## Processed`);
+  const tracker = TRACKER + "| 338 | 2026-10-05 | Bridebook | — | Performance Marketing Associate | 2.4/5 | Evaluated | ❌ | [338](../reports/338-bridebook-2026-10-05.md) | x |\n";
+  const root = dataFolder({ pipeline, tracker });
+  fs.mkdirSync(path.join(root, "reports"));
+  fs.writeFileSync(path.join(root, "reports/338-bridebook-2026-10-05.md"), `# Evaluation: Bridebook\n\n**URL:** ${BRIDEBOOK.replace("position=17&pageNum=0", "position=3&trackingId=abc")}\n`);
+  const { jobs, inbox } = readInboxSummary(root);
+  assert.deepEqual(inboxFate(inbox, BRIDEBOOK), {
+    url: BRIDEBOOK,
+    shown: false,
+    tracked: { n: "338", status: "Evaluated", date: "2026-10-05" },
+    reason: "already in the tracker as row 338 (Evaluated)",
+  });
+  assert.equal(countInbox(jobs, inbox).hidden.length, 4);
+});

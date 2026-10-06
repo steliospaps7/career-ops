@@ -72,8 +72,10 @@ export function readScanDates(root) {
 /** The composition the Inbox shows: the scan date joined on, newest scan first,
  *  one row per URL, a row the tracker holds marked done with its tracker row,
  *  and a row hidden with X marked done with its time. The tracker wins when a
- *  row is both. */
-export function composeInbox(jobs, scanDates, applications, hiddenEntries = []) {
+ *  row is both. `readReport` reads a report a tracker row links, so a row
+ *  whose advert's posting id matches the report's URL is hidden too
+ *  (inbox-tracked.mjs). */
+export function composeInbox(jobs, scanDates, applications, hiddenEntries = [], readReport) {
   return markHiddenInbox(
     markTrackedInbox(
       orderInboxByScan(
@@ -81,6 +83,7 @@ export function composeInbox(jobs, scanDates, applications, hiddenEntries = []) 
         scanDates,
       ),
       applications,
+      readReport,
     ),
     hiddenEntries,
   );
@@ -101,7 +104,9 @@ export function readInboxSummary(root) {
   } catch {
     /* shown as if nothing were hidden */
   }
-  return { jobs, applications, hiddenEntries, inbox: composeInbox(jobs, readScanDates(root), applications, hiddenEntries) };
+  // A report link is relative to data/, where the tracker lives.
+  const readReport = (rel) => readText(path.join(root, "data"), rel);
+  return { jobs, applications, hiddenEntries, inbox: composeInbox(jobs, readScanDates(root), applications, hiddenEntries, readReport) };
 }
 
 /**
