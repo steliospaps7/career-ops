@@ -4453,18 +4453,27 @@ export function readLastRunSources(filePath = SCAN_SOURCES_PATH) {
   for (let i = lines.length - 1; i >= 0; i--) {
     const cols = lines[i].split('\t');
     if (cols[0] === 'timestamp' || rows.has(cols[1])) continue;
-    rows.set(cols[1], { paid: cols[3] === 'paid', status: cols[4], found: Number(cols[5]) });
+    // A blank count is NaN, not 0 (Number('') is 0), so it is never read as an empty run.
+    const found = (cols[5] ?? '').trim() === '' ? NaN : Number(cols[5]);
+    rows.set(cols[1], { paid: cols[3] === 'paid', status: cols[4], found });
   }
   return rows;
 }
 
+// A paid feed under this many postings on two runs running is named in the summary.
+export const NEAR_EMPTY_PAID_FEED = 5;
+
 /**
- * One warning per paid feed that found nothing on this run and on its last
- * appearance in the log. A paid feed can go quiet for days while its reader
+ * One warning per paid feed under NEAR_EMPTY_PAID_FEED on this run and on its
+ * last appearance in the log, in the old "empty" wording when both are 0. A paid feed can go quiet for days while its reader
  * reports success (Indeed, 19 to 21 September 2026), and one empty run is
  * normal, so it takes two. A run that errored also found nothing; the line
  * then names the status of each run, so a timeout reads differently from a
  * feed that answered with nothing.
+ *
+ * A feed under NEAR_EMPTY_PAID_FEED on both runs, but not empty on both, gets
+ * the "under" line instead, with each run's status and count: Indeed found 1,
+ * 1 and 9 on 27 and 28 September 2026 and the empty line stayed silent.
  *
  * @param {Array<object>} records - from ledger.records()
  * @param {Map<string, {paid: boolean, status: string, found: number}>} previous - from readLastRunSources
@@ -4473,13 +4482,19 @@ export function readLastRunSources(filePath = SCAN_SOURCES_PATH) {
 export function emptyPaidFeedWarnings(records, previous) {
   const lines = [];
   for (const r of records) {
-    if (!r.paid || r.found !== 0) continue;
+    if (!r.paid || r.found >= NEAR_EMPTY_PAID_FEED) continue;
     const before = previous.get(sanitizeTsvField(r.name));
-    if (!before || !before.paid || before.found !== 0) continue;
-    const statuses = r.status === 'empty' && before.status === 'empty'
-      ? ''
-      : ` (last run ${before.status}, this run ${r.status})`;
-    lines.push(`WARNING: ${r.name} empty two runs running${statuses}`);
+    // A last row whose count is not a number gives no warning.
+    if (!before || !before.paid || !Number.isFinite(before.found) || before.found >= NEAR_EMPTY_PAID_FEED) continue;
+    if (r.found === 0 && before.found === 0) {
+      const statuses = r.status === 'empty' && before.status === 'empty'
+        ? ''
+        : ` (last run ${before.status}, this run ${r.status})`;
+      lines.push(`WARNING: ${r.name} empty two runs running${statuses}`);
+    } else {
+      lines.push(`WARNING: ${r.name} under ${NEAR_EMPTY_PAID_FEED} two runs running `
+        + `(last run ${before.status} ${before.found}, this run ${r.status} ${r.found})`);
+    }
   }
   return lines;
 }
