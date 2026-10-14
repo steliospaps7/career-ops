@@ -2703,7 +2703,8 @@ job_boards:
   # auto-resolves from `careers_url` on first fetch; set it to skip that
   # lookup. Optional knobs: `getro_max_pages` (default 40, hard-capped at
   # 1500), `getro_max_age_days` (default 90, a pagination bound — newest-first,
-  # stops once postings cross the age).
+  # stops once postings cross the age), `getro_exclude_url_hosts` (a list such
+  # as [remote.com]; drops jobs whose URL host is one of them or a subdomain).
 
   - name: b2venture (portfolio)
     careers_url: https://jobs.b2venture.vc/jobs
