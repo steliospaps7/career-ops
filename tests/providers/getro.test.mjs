@@ -274,6 +274,41 @@ try {
     fail(`getro.fetch() later-page failure handling: ${JSON.stringify(getroLaterPageFail)}`);
   }
 
+  // getro_exclude_url_hosts drops a job whose URL host matches exactly or as a
+  // subdomain — never by substring — and keeps a URL that doesn't parse.
+  const hostMixJobs = [
+    { title: 'Shell A', url: 'https://remote.com/jobs/acme-c1/pm-j1', organization: { name: 'Remote' } },
+    { title: 'Shell B', url: 'https://www.remote.com/jobs/acme-c1/ops-j2', organization: { name: 'Remote' } },
+    { title: 'Lookalike', url: 'https://notremote.com/jobs/1', organization: { name: 'NotRemote' } },
+    { title: 'Unparseable', url: 'not a url', organization: { name: 'Acme' } },
+    { title: 'Remote own job', url: 'https://boards.greenhouse.io/remotecom/jobs/123', organization: { name: 'Remote' } },
+  ];
+  const hostMixCtx = { fetchJson: async () => ({ results: { count: hostMixJobs.length, jobs: hostMixJobs } }) };
+  const getroExcluded = await getro.fetch({ ...okEntry, getro_exclude_url_hosts: ['remote.com'] }, hostMixCtx);
+  const excludedTitles = getroExcluded.map((j) => j.title).join('|');
+  if (excludedTitles === 'Lookalike|Unparseable|Remote own job') {
+    pass('getro.fetch() drops remote.com and www.remote.com URLs under getro_exclude_url_hosts, keeps notremote.com, an unparseable URL and Remote\'s own Greenhouse job');
+  } else {
+    fail(`getro.fetch() getro_exclude_url_hosts kept: ${excludedTitles}`);
+  }
+  const getroUnfiltered = await getro.fetch(okEntry, hostMixCtx);
+  if (getroUnfiltered.map((j) => j.title).join('|') === hostMixJobs.map((j) => j.title).join('|')) {
+    pass('getro.fetch() without getro_exclude_url_hosts returns every job as before');
+  } else {
+    fail(`getro.fetch() without the option returned: ${getroUnfiltered.map((j) => j.title).join('|')}`);
+  }
+
+  // A dropped row that is also past the age cutoff still stops the walk.
+  let getroExcludedAgePages = 0;
+  await getro.fetch({ ...okEntry, getro_max_age_days: 90, getro_exclude_url_hosts: ['remote.com'] }, {
+    fetchJson: async () => {
+      getroExcludedAgePages++;
+      return { results: { count: 100, jobs: [{ title: 'Stale shell', url: `https://remote.com/jobs/s${getroExcludedAgePages}`, organization: { name: 'Remote' }, created_at: staleCreatedAt }] } };
+    },
+  });
+  if (getroExcludedAgePages === 1) pass('getro.fetch() still stops pagination on a stale row that getro_exclude_url_hosts drops');
+  else fail(`getro.fetch() excluded stale row: ${getroExcludedAgePages} pages`);
+
   // Malformed / empty payload → empty array, no crash, no infinite pagination.
   const getroEmpty = await getro.fetch(okEntry, { fetchJson: async () => ({}) });
   if (Array.isArray(getroEmpty) && getroEmpty.length === 0) pass('getro.fetch() tolerates an empty payload');

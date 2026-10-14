@@ -36,6 +36,14 @@
 // Jobs with no created_at are kept ("missing data = pass", same rule as the
 // location filter).
 //
+// `getro_exclude_url_hosts` (optional, a list of hostnames) drops any job whose
+// URL host is one of them or a subdomain of one (`remote.com` drops
+// `remote.com` and `www.remote.com`, never `notremote.com`). Some boards carry
+// a job marketplace's own listings beside the portfolio's real jobs (Index
+// Ventures' board carries remote.com's), and the company name can't tell them
+// apart. A URL that doesn't parse is kept ("missing data = pass"). Entries
+// without the option behave exactly as before.
+//
 // The same logical role can appear as several listings in the raw feed (once
 // per location) — that's downstream dedup's job (by url), not this
 // provider's; do not fold results.count into a "unique roles" assumption.
@@ -82,6 +90,27 @@ const INTER_PAGE_DELAY_MS = 250;
 function sleep(ms, ctx) {
   if (typeof ctx?.sleep === 'function') return ctx.sleep(ms);
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** `entry.getro_exclude_url_hosts`: lowercased hostnames, [] when absent or not a list. */
+function resolveExcludedHosts(entry) {
+  const hosts = entry.getro_exclude_url_hosts;
+  if (!Array.isArray(hosts)) return [];
+  return hosts
+    .filter((h) => typeof h === 'string' && h.trim())
+    .map((h) => h.trim().toLowerCase().replace(/\.$/, ''));
+}
+
+/** True when `url`'s host is one of `hosts` or a subdomain of one. An unparseable URL is kept. */
+function isExcludedHost(url, hosts) {
+  if (hosts.length === 0) return false;
+  let host;
+  try {
+    host = new URL(url).hostname.toLowerCase().replace(/\.$/, '');
+  } catch {
+    return false;
+  }
+  return hosts.some((h) => host === h || host.endsWith('.' + h));
 }
 
 /** Manual override: `entry.getro_collection`, a positive integer or all-digit string. */
@@ -219,6 +248,8 @@ export default {
       ? entry.getro_max_age_days : DEFAULT_MAX_AGE_DAYS;
     const cutoffMs = maxAgeDays > 0 ? Date.now() - maxAgeDays * 86_400_000 : 0;
 
+    const excludedHosts = resolveExcludedHosts(entry);
+
     const out = [];
     let total = Infinity;
     for (let page = 0; page < maxPages && page * HITS_PER_PAGE < total; page++) {
@@ -277,6 +308,8 @@ export default {
           reachedOld = true;
           continue;
         }
+        // After the age check, so a dropped row still stops the walk when old.
+        if (isExcludedHost(url, excludedHosts)) continue;
         const row = {
           title: j.title || '',
           url,
