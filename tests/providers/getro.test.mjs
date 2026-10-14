@@ -300,14 +300,15 @@ try {
 
   // A dropped row that is also past the age cutoff still stops the walk.
   let getroExcludedAgePages = 0;
-  await getro.fetch({ ...okEntry, getro_max_age_days: 90, getro_exclude_url_hosts: ['remote.com'] }, {
+  const getroExcludedAged = await getro.fetch({ ...okEntry, getro_max_age_days: 90, getro_exclude_url_hosts: ['remote.com'] }, {
+    sleep: async () => {},
     fetchJson: async () => {
       getroExcludedAgePages++;
       return { results: { count: 100, jobs: [{ title: 'Stale shell', url: `https://remote.com/jobs/s${getroExcludedAgePages}`, organization: { name: 'Remote' }, created_at: staleCreatedAt }] } };
     },
   });
-  if (getroExcludedAgePages === 1) pass('getro.fetch() still stops pagination on a stale row that getro_exclude_url_hosts drops');
-  else fail(`getro.fetch() excluded stale row: ${getroExcludedAgePages} pages`);
+  if (getroExcludedAged.length === 0 && getroExcludedAgePages === 1) pass('getro.fetch() still stops pagination on a stale row that getro_exclude_url_hosts drops');
+  else fail(`getro.fetch() excluded stale row: ${getroExcludedAgePages} pages, ${getroExcludedAged.length} jobs kept`);
 
   // Malformed / empty payload → empty array, no crash, no infinite pagination.
   const getroEmpty = await getro.fetch(okEntry, { fetchJson: async () => ({}) });

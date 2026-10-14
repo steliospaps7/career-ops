@@ -41,8 +41,8 @@
 // `remote.com` and `www.remote.com`, never `notremote.com`). Some boards carry
 // a job marketplace's own listings beside the portfolio's real jobs (Index
 // Ventures' board carries remote.com's), and the company name can't tell them
-// apart. A URL that doesn't parse is kept ("missing data = pass"). Entries
-// without the option behave exactly as before.
+// apart. A URL that doesn't parse is kept ("missing data = pass"). Without
+// the option, nothing is filtered.
 //
 // The same logical role can appear as several listings in the raw feed (once
 // per location) — that's downstream dedup's job (by url), not this
@@ -102,7 +102,7 @@ function resolveExcludedHosts(entry) {
 }
 
 /** True when `url`'s host is one of `hosts` or a subdomain of one. An unparseable URL is kept. */
-function isExcludedHost(url, hosts) {
+function isExcludedUrlHost(url, hosts) {
   if (hosts.length === 0) return false;
   let host;
   try {
@@ -309,7 +309,7 @@ export default {
           continue;
         }
         // After the age check, so a dropped row still stops the walk when old.
-        if (isExcludedHost(url, excludedHosts)) continue;
+        if (isExcludedUrlHost(url, excludedHosts)) continue;
         const row = {
           title: j.title || '',
           url,
