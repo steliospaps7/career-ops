@@ -1,9 +1,10 @@
-// tests/empty-paid-feed-warning.test.mjs — a paid feed empty two runs running is named.
+// tests/empty-paid-feed-warning.test.mjs — a paid feed under 5 two runs running is named.
 //
 // Indeed returned nothing from 19 to 21 September 2026 while its reader
 // reported success, and nothing in the run summary said so. The scan now reads
 // the previous run's rows in the per-source log and prints one warning line
-// for each paid feed that found nothing on both runs.
+// for each paid feed under 5 on both runs, in the old "empty" wording when
+// both are 0.
 //
 // The fixture's last two rows are copied from the 21 September 09:00 run;
 // an older run sits before them, and later cases add a free-only run after.
@@ -19,6 +20,7 @@ const {
   createSourceLedger,
   readLastRunSources,
   emptyPaidFeedWarnings,
+  NEAR_EMPTY_PAID_FEED,
   SCAN_SOURCES_HEADER,
 } = await import(pathToFileURL(join(ROOT, 'scan.mjs')).href);
 
@@ -86,6 +88,89 @@ try {
     pass('a feed that errored warns with the status of each run');
   } else {
     fail(`error warnings = ${JSON.stringify(errorWarnings)}`);
+  }
+
+  // Near empty: under NEAR_EMPTY_PAID_FEED (5) on both runs. Indeed found 1, 1
+  // and 9 on 27 and 28 September 2026 and the empty line said nothing.
+  function nearEmpty(lastFound, thisFound, withHandRun = false, lastStatus = lastFound === 0 ? 'empty' : 'ok') {
+    const p = join(dir, `near-${lastFound}-${thisFound}-${withHandRun}-${lastStatus}.tsv`);
+    writeFileSync(p, SCAN_SOURCES_HEADER
+      + `2026-09-27T16:03:00.000Z\t${INDEED}\tcompany\tpaid\t${lastStatus}\t${lastFound}\t0\t${lastFound}\t\t\n`
+      + (withHandRun ? '2026-09-27T18:00:00.000Z\tMonzo\tcompany\tfree\tok\t71\t0\t71\ttitle=71\t\n' : ''));
+    const run = createSourceLedger();
+    run.register(INDEED, { paid: true });
+    if (thisFound > 0) run.found(INDEED, thisFound);
+    return emptyPaidFeedWarnings(run.records(), readLastRunSources(p));
+  }
+
+  const oneOne = nearEmpty(1, 1);
+  const oneOneLine = `WARNING: ${INDEED} under 5 two runs running (last run ok 1, this run ok 1)`;
+  if (NEAR_EMPTY_PAID_FEED === 5 && oneOne.length === 1 && oneOne[0] === oneOneLine) {
+    pass('1 then 1 prints the under-5 line with each run\'s status and count');
+  } else {
+    fail(`1 then 1 = ${JSON.stringify(oneOne)}`);
+  }
+
+  const zeroZero = nearEmpty(0, 0);
+  if (zeroZero.length === 1 && zeroZero[0] === `WARNING: ${INDEED} empty two runs running`) {
+    pass('0 then 0 keeps the empty line, unchanged');
+  } else {
+    fail(`0 then 0 = ${JSON.stringify(zeroZero)}`);
+  }
+
+  const fourFive = nearEmpty(4, 5);
+  if (fourFive.length === 0) {
+    pass('4 then 5 prints nothing (5 is not under 5)');
+  } else {
+    fail(`4 then 5 = ${JSON.stringify(fourFive)}`);
+  }
+
+  const nineOne = nearEmpty(9, 1);
+  if (nineOne.length === 0) {
+    pass('9 then 1 prints nothing (one low run is not two)');
+  } else {
+    fail(`9 then 1 = ${JSON.stringify(nineOne)}`);
+  }
+
+  const mixed = [
+    [0, 3, 'ok', `WARNING: ${INDEED} under 5 two runs running (last run empty 0, this run ok 3)`],
+    [3, 0, 'ok', `WARNING: ${INDEED} under 5 two runs running (last run ok 3, this run empty 0)`],
+  ];
+  for (const [a, b, , want] of mixed) {
+    const got = nearEmpty(a, b);
+    if (got.length === 1 && got[0] === want) {
+      pass(`${a} then ${b} prints the under-5 line, not the empty one`);
+    } else {
+      fail(`${a} then ${b} = ${JSON.stringify(got)}`);
+    }
+  }
+  const errorThenTwo = nearEmpty(0, 2, false, 'error');
+  if (errorThenTwo.length === 1
+    && errorThenTwo[0] === `WARNING: ${INDEED} under 5 two runs running (last run error 0, this run ok 2)`) {
+    pass('an errored last run at 0, then 2, names the error status in the under-5 line');
+  } else {
+    fail(`error 0 then 2 = ${JSON.stringify(errorThenTwo)}`);
+  }
+
+  // A last row with a blank count column is not a count: no warning.
+  const blankPath = join(dir, 'near-blank.tsv');
+  writeFileSync(blankPath, SCAN_SOURCES_HEADER
+    + `2026-09-27T16:03:00.000Z\t${INDEED}\tcompany\tpaid\tok\t\t0\t0\t\t\n`);
+  const blankRun = createSourceLedger();
+  blankRun.register(INDEED, { paid: true });
+  blankRun.found(INDEED, 1);
+  const blank = emptyPaidFeedWarnings(blankRun.records(), readLastRunSources(blankPath));
+  if (blank.length === 0) {
+    pass('a last row with a blank count, then 1, prints no line');
+  } else {
+    fail(`blank then 1 = ${JSON.stringify(blank)}`);
+  }
+
+  const walked = nearEmpty(1, 1, true);
+  if (walked.length === 1 && walked[0] === oneOneLine) {
+    pass('a one-board hand run between two runs of 1 is walked past, and the under-5 line prints');
+  } else {
+    fail(`1, hand run, 1 = ${JSON.stringify(walked)}`);
   }
 
   // No log yet (first run ever): nothing to compare with, no warning.
