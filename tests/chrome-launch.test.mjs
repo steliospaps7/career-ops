@@ -50,10 +50,29 @@ try {
     ? pass('importing the module launches nothing (it imports nothing and calls no launch)')
     : fail('lib/chrome-launch.mjs imports a module or calls launch()');
 
-  // Guard: no bare chromium.launch( outside the allow-list. Comment lines are
-  // skipped; a launch wrapped in chromeLaunchOptions( is the moved form. A line
+  // Guard: no bare chromium.launch( outside the allow-list. Only lines that
+  // are wholly comments are skipped (code after a leading /* ... */ is checked); a launch wrapped in chromeLaunchOptions( is the moved form. A line
   // marked "// bundled-chromium:" is a deliberate check of the bundled browser
   // (doctor.mjs, for the PDF renders) and says why on the line itself.
+  const isBareLaunch = (line) => {
+    if (/\/\/ bundled-chromium:/.test(line)) return false;
+    const code = line.replace(/\/\*.*?\*\//g, '');
+    if (/^\s*(\/\/|\*|\/\*)/.test(code)) return false;
+    return /chromium\.launch\((?!chromeLaunchOptions\()/.test(code);
+  };
+  const cases = [
+    ['/* job page */ await chromium.launch({ headless: true });', true],
+    ['  // chromium.launch() may use the headless-shell binary', false],
+    [' * chromium.launch({ headless: true })', false],
+    ['await chromium.launch(chromeLaunchOptions({ headless: true }));', false],
+    ['await chromium.launch({ headless: true }); // bundled-chromium: PDFs', false],
+    ['await chromium.launch({ headless: true });', true],
+  ];
+  const wrong = cases.filter(([line, want]) => isBareLaunch(line) !== want);
+  wrong.length === 0
+    ? pass('the guard flags code after a leading /* ... */ and skips only whole-comment or marked lines')
+    : fail(`guard misreads: ${wrong.map(([l]) => l).join(' | ')}`);
+
   const tracked = execFileSync('git', ['ls-files', '*.mjs'], { cwd: ROOT, encoding: 'utf8' })
     .split('\n').filter(Boolean);
   const offenders = [];
@@ -62,8 +81,7 @@ try {
     let text;
     try { text = readFileSync(join(ROOT, file), 'utf8'); } catch { continue; }
     text.split('\n').forEach((line, i) => {
-      if (/^\s*(\/\/|\*|\/\*)/.test(line) || /\/\/ bundled-chromium:/.test(line)) return;
-      if (/chromium\.launch\((?!chromeLaunchOptions\()/.test(line)) offenders.push(`${file}:${i + 1}`);
+      if (isBareLaunch(line)) offenders.push(`${file}:${i + 1}`);
     });
   }
   offenders.length === 0

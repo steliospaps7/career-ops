@@ -255,11 +255,11 @@ async function checkGoogleChrome() {
   try {
     browser = await chromium.launch(chromeLaunchOptions({ headless: true }));
     return { pass: true, label: `Google Chrome ${browser.version()} launches with its sandbox on` };
-  } catch {
+  } catch (err) {
     return {
       pass: false,
-      label: 'Google Chrome not found or would not launch',
-      fix: 'Install Google Chrome: https://www.google.com/chrome/ (job-page browsers need it)',
+      label: `Google Chrome would not launch: ${String(err?.message ?? err).split('\n')[0]}`,
+      fix: 'If Google Chrome is missing, install it: https://www.google.com/chrome/ (job-page browsers need it)',
     };
   } finally {
     try { await browser?.close(); } catch { /* ignore */ }
