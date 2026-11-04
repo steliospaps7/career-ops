@@ -35,6 +35,7 @@ import { appendToPipeline, appendToScanHistory } from './scan.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { chromeLaunchOptions } from './lib/chrome-launch.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const tracker = new TokenAccumulator();
@@ -430,7 +431,7 @@ async function fetchJobPage(url) {
   if (chromium) {
     let browser;
     try {
-      browser = await chromium.launch({ headless: true });
+      browser = await chromium.launch(chromeLaunchOptions({ headless: true }));
       const page = await browser.newPage();
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
       await page.waitForTimeout(2000); // wait for SPA render

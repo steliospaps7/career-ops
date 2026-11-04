@@ -26,6 +26,7 @@ import { getCareerOpsRoot } from './path-resolver.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { printScanSummaryHeader } from './lib/scan-summary-marker.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { chromeLaunchOptions } from './lib/chrome-launch.mjs';
 
 // ── Config ───────────────────────────────────────────────────────────
 
@@ -290,7 +291,7 @@ async function main() {
   const dupeSkipped = [];
   const errors = [];
 
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(chromeLaunchOptions({ headless: true }));
   const context = await browser.newContext({ locale: 'de-DE', timezoneId: 'Europe/Berlin' });
   const page = await context.newPage();
 

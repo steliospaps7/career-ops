@@ -4569,6 +4569,7 @@ async function parallelFetch(tasks, limit) {
 async function verifyOffers(offers, { headedFallback = false, throttleBaseMs = 0, rediscover = false } = {}) {
   // Dynamic imports keep the default zero-token path free of Playwright startup
   let chromium;
+  let chromeLaunchOptions;
   let checkUrlLiveness;
   let checkUrlLivenessWithFallback;
   let createHeadedPageProvider;
@@ -4577,20 +4578,21 @@ async function verifyOffers(offers, { headedFallback = false, throttleBaseMs = 0
   let sleep;
   try {
     ({ chromium } = await import('playwright'));
+    ({ chromeLaunchOptions } = await import('./lib/chrome-launch.mjs'));
     ({ checkUrlLiveness, checkUrlLivenessWithFallback, createHeadedPageProvider, newLivenessPage, jitteredDelayMs, sleep } = await import('./liveness-browser.mjs'));
   } catch (err) {
     throw new Error(
-      `--verify requires Playwright with Chromium (run "npx playwright install chromium"): ${err.message}`,
+      `--verify requires Playwright and Google Chrome installed: ${err.message}`,
       { cause: err },
     );
   }
 
   let browser;
   try {
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch(chromeLaunchOptions({ headless: true }));
   } catch (err) {
     throw new Error(
-      `--verify could not launch Chromium (run "npx playwright install chromium" or re-run without --verify): ${err.message}`,
+      `--verify could not launch Google Chrome (install Google Chrome, or re-run without --verify): ${err.message}`,
       { cause: err },
     );
   }
