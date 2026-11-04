@@ -61,7 +61,7 @@ All scripts live in the project root as `.mjs` modules. Most are exposed via
 
 ## doctor
 
-Validates that all prerequisites are in place: Node.js >= 18, dependencies installed, Playwright chromium, required files (`cv.md`, `config/profile.yml`, `portals.yml`), fonts directory, and auto-creates `data/`, `output/`, `reports/` if missing.
+Validates that all prerequisites are in place: Node.js >= 18, dependencies installed, Playwright chromium (for PDFs), Google Chrome (launched with its sandbox on, for every browser that opens a job page), required files (`cv.md`, `config/profile.yml`, `portals.yml`), fonts directory, and auto-creates `data/`, `output/`, `reports/` if missing.
 
 ```bash
 npm run doctor
@@ -587,7 +587,7 @@ npm run rollback
 
 ## liveness
 
-Tests whether job posting URLs are still live. Two rungs: a zero-token API check first (`liveness-api.mjs` — Greenhouse, Lever, Ashby, Workday, LinkedIn), falling back to headless Chromium (`liveness-browser.mjs`) for everything else or when the API is inconclusive. The browser rung detects expired patterns (e.g. "job no longer available"), HTTP 404/410, ATS redirect patterns, and apply-button presence, and supports multi-language expired patterns (English, German, French).
+Tests whether job posting URLs are still live. Two rungs: a zero-token API check first (`liveness-api.mjs` — Greenhouse, Lever, Ashby, Workday, LinkedIn), falling back to headless Google Chrome with its sandbox on (`liveness-browser.mjs`, via `lib/chrome-launch.mjs`; Google Chrome must be installed) for everything else or when the API is inconclusive. The browser rung detects expired patterns (e.g. "job no longer available"), HTTP 404/410, ATS redirect patterns, and apply-button presence, and supports multi-language expired patterns (English, German, French).
 
 The LinkedIn rung reads the guest posting endpoint, which returns the rendered posting as HTML and answers HTTP 200 for closed postings as well as live ones. Liveness therefore comes from two independent signals in the body — the "No longer accepting applications" banner and the apply control — and the rung only concludes when they agree: banner without apply control is expired, apply control without banner is live, a body carrying both or neither is `uncertain`. That `uncertain` is final rather than a fall-through, because a headless fetch of `linkedin.com/jobs/view/{id}` lands on a generic search page rather than the posting, so the browser rung has nothing better to offer. The endpoint is unauthenticated and rate-limited, so the rung spaces its own requests.
 

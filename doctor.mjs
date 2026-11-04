@@ -18,6 +18,7 @@ import { resolveExtractorMode } from './browser-extract.mjs';
 import { parseConfigByExtension } from './jsonc-parse.mjs';
 import { validateFlags } from './lib/cli-flags.mjs';
 import { geminiNodeFloor } from './lib/gemini-node-floor.mjs';
+import { chromeLaunchOptions } from './lib/chrome-launch.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -227,13 +228,38 @@ async function checkPlaywright() {
   // present but no binary — just ABOUT + LICENSE files).
   let browser;
   try {
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch({ headless: true }); // bundled-chromium: the PDF renders use it
     return { pass: true, label: 'Playwright chromium installed' };
   } catch {
     return {
       pass: false,
       label: 'Playwright chromium not installed',
       fix: 'Run: npx playwright install chromium',
+    };
+  } finally {
+    try { await browser?.close(); } catch { /* ignore */ }
+  }
+}
+
+// Every launch that opens a web page uses the installed Google Chrome with its
+// sandbox on (lib/chrome-launch.mjs); the bundled Chromium checked above is
+// kept for the PDF renders only. Launch it the same way to prove it works.
+async function checkGoogleChrome() {
+  let chromium;
+  try {
+    ({ chromium } = await import('playwright'));
+  } catch {
+    return { pass: false, label: 'Google Chrome not checked (Playwright missing)', fix: 'Run: npm install' };
+  }
+  let browser;
+  try {
+    browser = await chromium.launch(chromeLaunchOptions({ headless: true }));
+    return { pass: true, label: `Google Chrome ${browser.version()} launches with its sandbox on` };
+  } catch (err) {
+    return {
+      pass: false,
+      label: `Google Chrome would not launch: ${String(err?.message ?? err).split('\n')[0]}`,
+      fix: 'If Google Chrome is missing, install it: https://www.google.com/chrome/ (job-page browsers need it)',
     };
   } finally {
     try { await browser?.close(); } catch { /* ignore */ }
@@ -655,6 +681,7 @@ async function main() {
     checkDependencies(),
     checkTrackedBakFiles(projectRoot),
     await checkPlaywright(),
+    await checkGoogleChrome(),
     checkPlaywrightMcp(process.cwd(), activeCli),
     checkScanExtractor(projectRoot),
     ...USER_LAYER_PREREQS.map(checkPrereq),

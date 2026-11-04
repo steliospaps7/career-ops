@@ -235,6 +235,7 @@ const SYSTEM_PATHS = [
   'lib/placeholder-cell.mjs',
   'lib/scan-summary-marker.mjs',
   'lib/is-main-module.mjs',
+  'lib/chrome-launch.mjs',
   'lib/mjs-files.mjs',
   'lib/outcome-dir.mjs',
   'lib/outcome-types.mjs',

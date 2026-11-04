@@ -122,6 +122,13 @@ PDFs are rendered with a headless Chromium. Install it once per machine:
 npx playwright install chromium
 ```
 
+### Google Chrome (for job pages)
+
+Every browser that opens a job page (liveness checks, `scan.mjs --verify`, `scan-ats-full.mjs --liveness`,
+`archive-posting.mjs`, `browser-extract.mjs` and the other page readers) launches the installed Google Chrome with
+Chrome's sandbox on, because it updates itself. Install it from https://www.google.com/chrome/. `node doctor.mjs`
+checks both browsers.
+
 ## Available Commands
 
 | Action | How |

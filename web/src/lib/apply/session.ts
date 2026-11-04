@@ -133,16 +133,13 @@ async function headedBrowser(): Promise<Browser> {
     nb = await chromium.launch({
       channel: "chrome",
       headless: false,
+      chromiumSandbox: true,
       args: ["--window-position=-3200,-3200", "--window-size=1280,940"], // off-screen during fill; moved on-screen at handoff
     });
   } catch {
-    // No system Google Chrome → fall back to Playwright's bundled Chromium if
-    // present; otherwise a clear, actionable error.
-    try {
-      nb = await chromium.launch({ headless: false, args: ["--window-position=-3200,-3200", "--window-size=1280,940"] });
-    } catch {
-      throw new Error("The apply feature needs Google Chrome. Install Chrome (or run: npx playwright install chromium) and try again.");
-    }
+    // No fallback to Playwright's bundled Chromium: it lags Chrome's security
+    // fixes, and this browser opens application forms on the open web.
+    throw new Error("The apply feature needs Google Chrome. Install Chrome and try again.");
   }
   globalThis.__coHeadedBrowser = nb;
   return nb;

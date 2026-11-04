@@ -29,6 +29,7 @@ try {
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { isMainModule } from './lib/is-main-module.mjs';
+import { chromeLaunchOptions } from './lib/chrome-launch.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const DATA_ROOT = getCareerOpsRoot();
@@ -362,7 +363,7 @@ async function main() {
     return;
   }
   console.log(`Found ${pendingIndices.length} pending offers.`);
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(chromeLaunchOptions({ headless: true }));
   
   const results = await processPipelineBatch(pendingIndices, CONCURRENCY, (lineIdx, runIdx) => {
     return processOffer(browser, pipelineLines[lineIdx], runIdx);

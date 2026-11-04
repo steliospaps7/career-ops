@@ -7,6 +7,7 @@
 
 import { classifyLiveness } from './liveness-core.mjs';
 import { BROWSER_LIKE_USER_AGENT } from './user-agent.mjs';
+import { chromeLaunchOptions } from './lib/chrome-launch.mjs';
 
 const NAVIGATE_TIMEOUT_MS = 15_000;
 const HYDRATION_WAIT_MS = 2_000;
@@ -498,7 +499,7 @@ export function createHeadedPageProvider(chromium) {
       if (page) return page;
       if (launchFailed) return null;
       try {
-        browser = await chromium.launch({ headless: false });
+        browser = await chromium.launch(chromeLaunchOptions({ headless: false }));
         const context = await browser.newContext(LIVENESS_CONTEXT_OPTIONS);
         page = await context.newPage();
         return page;

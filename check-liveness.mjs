@@ -25,6 +25,7 @@ import {
   sleep,
 } from './liveness-browser.mjs';
 import { checkLivenessViaApi } from './liveness-api.mjs';
+import { chromeLaunchOptions } from './lib/chrome-launch.mjs';
 
 const USAGE = `Usage:
   node check-liveness.mjs [--no-fallback] [--throttle[=ms]] <url1> [url2] ...
@@ -76,7 +77,7 @@ async function main() {
   let browser = null, page = null, headed = null;
   async function ensureBrowser() {
     if (browser) return;
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch(chromeLaunchOptions({ headless: true }));
     page = await newLivenessPage(browser);
     headed = noFallback ? null : createHeadedPageProvider(chromium);
   }

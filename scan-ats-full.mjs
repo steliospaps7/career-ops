@@ -63,6 +63,7 @@ import { validateFlags } from './lib/cli-flags.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { boardKey, loadDeadBoards, recordBoardResult, saveDeadBoards, shouldSkipDeadBoard } from './dead-boards.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
+import { chromeLaunchOptions } from './lib/chrome-launch.mjs';
 
 // ── Config ──────────────────────────────────────────────────────────
 
@@ -673,12 +674,12 @@ async function filterLive(offers) {
     ({ checkUrlLiveness, newLivenessPage } = await import('./liveness-browser.mjs'));
   } catch (err) {
     throw new Error(
-      `--liveness requires Playwright with Chromium (run "npx playwright install chromium"): ${err.message}`,
+      `--liveness requires Playwright and Google Chrome installed: ${err.message}`,
       { cause: err },
     );
   }
   console.error(`\nVerifying liveness of ${offers.length} match(es) with Playwright (sequential)...`);
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch(chromeLaunchOptions({ headless: true }));
   const live = [];
   try {
     const page = await newLivenessPage(browser);
