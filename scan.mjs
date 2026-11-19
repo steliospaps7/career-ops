@@ -5031,14 +5031,12 @@ async function main() {
       }
       if (filterCompany && !entry.name.toLowerCase().includes(filterCompany)) continue;
 
-      const kind = entry.kind || (isBoard ? 'aggregator' : 'company');
-      sourceLedger.register(entry.name, { kind: isBoard ? 'board' : kind });
+      let kind = String(entry.kind ?? '').trim().toLowerCase() || (isBoard ? 'aggregator' : 'company');
       if (!['company', 'portfolio', 'aggregator'].includes(kind)) {
-        const error = `invalid source kind: ${kind}`;
-        resolveErrors.push({ company: entry.name, error });
-        sourceLedger.error(entry.name, error);
-        continue;
+        console.warn(`Unknown source kind "${entry.kind}" for ${entry.name}; using company`);
+        kind = 'company';
       }
+      sourceLedger.register(entry.name, { kind: isBoard ? 'board' : kind });
 
       const resolved = resolveProvider(entry, providers);
       if (!resolved) {
@@ -5064,7 +5062,7 @@ async function main() {
       // apify plugin is one that spends money, so the yield and the spend show
       // up in the same glance.
       sourceLedger.describe(entry.name, { paid: resolved.provider.id === 'apify' });
-      targets.push({ ...entry, _provider: resolved.provider, _isBoard: isBoard });
+      targets.push({ ...entry, kind, _provider: resolved.provider, _isBoard: isBoard });
       if (isBoard) boardCount++;
     }
   }

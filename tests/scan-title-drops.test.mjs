@@ -160,7 +160,7 @@ tracked_companies:
   - name: Direct
     careers_url: https://job-boards.greenhouse.io/direct
   - name: Portfolio
-    kind: portfolio
+    kind: " Portfolio "
     careers_url: https://job-boards.greenhouse.io/portfolio
   - name: Aggregator
     kind: aggregator
@@ -246,5 +246,20 @@ test('an unwritable title-drop path reports an error but still saves pipeline an
     assert.match(result.errors[0].error, /title.drops.*(?:ENOTDIR|EEXIST)/i);
     assert.match(readFileSync(l.pipeline, 'utf8'), /https:\/\/boards.example.com\/kept\/1/);
     assert.match(readFileSync(l.history, 'utf8'), /https:\/\/boards.example.com\/kept\/1/);
+  } finally { cleanup(l); }
+});
+
+
+test('an unknown source kind warns once, falls back to company, and still scans', async () => {
+  const l = lane(PORTALS.replace('  - name: Fixture Board', '  - name: Fixture Board\n    kind: vc'));
+  try {
+    const { stdout, stderr } = await execFileAsync(NODE, [scan, '--json'], {
+      cwd: ROOT, env: l.env, encoding: 'utf8', timeout: 30000,
+    });
+    assert.deepEqual(JSON.parse(stdout).errors, []);
+    assert.equal((stderr.match(/unknown source kind/gi) || []).length, 1);
+    assert.match(stderr, /vc.*company/i);
+    assert.equal(rows(l.drops).length, 2);
+    assert.ok(rows(l.drops).every(row => row.source_kind === 'company'));
   } finally { cleanup(l); }
 });
