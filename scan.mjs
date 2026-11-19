@@ -5011,6 +5011,7 @@ async function main() {
   // attributed after the sweep's own scope is gone.
   const sourceByOfferUrl = new Map();
   let skippedCount = 0;
+  let paidSourcesNotRead = 0;
   let boardCount = 0;
   const resolveErrors = [];
   const agentHandoff = [];
@@ -5037,6 +5038,13 @@ async function main() {
         kind = 'company';
       }
       sourceLedger.register(entry.name, { kind: isBoard ? 'board' : kind });
+
+      if (measureTitle && entry.provider === 'apify') {
+        paidSourcesNotRead++;
+        sourceLedger.describe(entry.name, { paid: true });
+        sourceLedger.skipped(entry.name, 'paid source not read during title measurement');
+        continue;
+      }
 
       const resolved = resolveProvider(entry, providers);
       if (!resolved) {
@@ -5076,6 +5084,7 @@ async function main() {
   if (boardCount > 0) parts.push(`${boardCount} job boards`);
   parts.push(`${localParserCount} local parser`);
   parts.push(`${skippedCount} skipped — no provider matched`);
+  if (measureTitle) parts.push(`${paidSourcesNotRead} paid sources not read`);
   console.log(`Scanning ${parts.join('; ')} via providers`);
   if (dryRun) console.log('(dry run — no files will be written)');
 
@@ -5516,6 +5525,9 @@ async function main() {
       console.log([kind, ...Object.values(counts)].join('\t'));
     }
     if (jsonMode) emitJsonReceipt({ title_measurement: titleMeasure, dry_run: true,
+      paid_sources_not_read: paidSourcesNotRead,
+      skipped: sourceLedger.records().filter(record => record.status === 'skipped')
+        .map(record => ({ company: record.name, reason: record.detail })),
       errors: errors.map(({ company, error }) => ({ company, error })),
     }, errors.length > 0 ? 2 : 0);
     return;

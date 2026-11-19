@@ -299,3 +299,22 @@ test('rows with an eighth column survive writes unchanged until their retention 
     assert.equal(readFileSync(l.drops, 'utf8'), TITLE_DROPS_HEADER);
   } finally { cleanup(l); }
 });
+
+
+test('--measure-title skips a paid plugin source without errors or a failing JSON exit', () => {
+  const l = lane(`tracked_companies:
+  - name: LinkedIn
+    provider: apify
+    careers_url: https://www.linkedin.com/jobs/
+`);
+  try {
+    const receipt = JSON.parse(run(l, ['--measure-title', '--json']));
+    assert.deepEqual(receipt.errors, []);
+    assert.deepEqual(receipt.skipped, [{ company: 'LinkedIn', reason: 'paid source not read during title measurement' }]);
+    assert.equal(receipt.paid_sources_not_read, 1);
+    const output = run(l, ['--measure-title']);
+    assert.match(output, /LinkedIn.*SKIPPED.*paid source not read/);
+    assert.match(output, /1 paid sources not read/);
+    for (const file of [l.pipeline, l.history, l.drops]) assert.equal(existsSync(file), false);
+  } finally { cleanup(l); }
+});
