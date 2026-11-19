@@ -23,6 +23,7 @@
  * Usage:
  *   node scan.mjs                  # scan all enabled companies
  *   node scan.mjs --dry-run        # preview without writing files
+ *   node scan.mjs --measure-title              # count unique title drops without writes or model calls
  *   node scan.mjs --company Cohere # scan a single company
  *   node scan.mjs --verify         # Playwright-check each new URL; drop expired postings
  *   node scan.mjs --verify --headed-fallback  # retry anti-bot-blocked URLs in a headed browser (needs a display)
@@ -77,7 +78,7 @@ import {
   advertStatusAt,
   defaultTransports,
 } from './providers/_advert-reader.mjs';
-import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter } from './title-keywords.mjs';
+import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, buildTitleDropReason } from './title-keywords.mjs';
 import {
   routeDetail,
   routeByTier,
@@ -125,6 +126,7 @@ const PROFILE_PATH = process.env.CAREER_OPS_PROFILE || path.join(DATA_ROOT, 'con
 // create data/pipeline.md in the cwd, then append the actual results to the
 // anchored one (#3510). One resolution, imported, cannot drift.
 export const SCAN_HISTORY_PATH = process.env.CAREER_OPS_SCAN_HISTORY || path.join(DATA_ROOT, 'data/scan-history.tsv');
+export const TITLE_DROPS_PATH = process.env.CAREER_OPS_TITLE_DROPS || path.join(path.dirname(SCAN_HISTORY_PATH), 'title-drops.tsv');
 export const PIPELINE_PATH = process.env.CAREER_OPS_PIPELINE || path.join(DATA_ROOT, 'data/pipeline.md');
 
 // Where the read adverts are stored (ticket B1). Anchored like every other data
@@ -216,7 +218,7 @@ export function emitJsonReceipt(receipt, exitCode) {
 // sections 11b and 44 among them — keep resolving it from here.
 // compileContentKeyword shares the `word:`/`stem:` prefix machinery but skips
 // the title filter's short-acronym auto-anchor (#3274).
-export { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter };
+export { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, buildTitleDropReason };
 
 // ── Title filter overrides (per-company broadened title net) ───────
 // Optional. `title_filter_overrides` in portals.yml lets specific companies
@@ -3966,6 +3968,46 @@ export async function appendToScanHistory(offers, date, status = 'added') {
   });
 }
 
+// Title drops share the history lock while checking history, and their own lock
+// while pruning and replacing the file. Both checks see the latest disk state.
+export const TITLE_DROPS_HEADER = 'date\tcompany\ttitle\turl\tlocation\tsource_kind\treason\n';
+
+function titleDropHistoryUrls(historyPath) {
+  return new Set(readIfExists(historyPath).split('\n')
+    .map(line => line.split('\t')[0])
+    .filter(url => /^https?:\/\//i.test(url))
+    .map(normalizeUrlForDedup));
+}
+
+export async function appendTitleDrops(drops, date, {
+  filePath = TITLE_DROPS_PATH, historyPath = SCAN_HISTORY_PATH,
+} = {}) {
+  if (drops.length === 0 && !existsSync(filePath)) return;
+  await withPipelineLock(historyPath, () => withPipelineLock(filePath, () => {
+    const historyUrls = titleDropHistoryUrls(historyPath);
+    const seen = new Set();
+    const cutoff = Date.parse(`${date}T00:00:00Z`) - 60 * 86400000;
+    const rows = [];
+    for (const line of readIfExists(filePath).split('\n')) {
+      const fields = line.split('\t');
+      if (fields.length < 7 || !(Date.parse(fields[0]) >= cutoff)) continue;
+      const key = normalizeUrlForDedup(fields[3]);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      rows.push(line);
+    }
+    const clean = value => String(value ?? '').replace(/[\t\r\n]+/g, ' ');
+    for (const drop of drops) {
+      const key = normalizeUrlForDedup(drop.url);
+      if (!key || seen.has(key) || historyUrls.has(key)) continue;
+      seen.add(key);
+      rows.push([date, drop.company, drop.title, drop.url, drop.location, drop.kind, drop.reason].map(clean).join('\t'));
+    }
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    atomicWriteFile(filePath, TITLE_DROPS_HEADER + rows.map(row => row + '\n').join(''));
+  }));
+}
+
 // ── Company blacklist (#1742) ───────────────────────────────────────
 
 // User Layer, so it follows the data root like every other input this file reads
@@ -4696,7 +4738,7 @@ function guardStatusFor(code) {
 // reply-watch.mjs (#2743/#2745) and dedup-tracker.mjs (#2744/#2746), shared
 // via lib/cli-flags.mjs's validateFlags() (#2775).
 const KNOWN_FLAGS = [
-  '--dry-run', '--verify', '--headed-fallback', '--throttle', '--rediscover-404',
+  '--dry-run', '--measure-title', '--verify', '--headed-fallback', '--throttle', '--rediscover-404',
   '--include-blacklisted', '--company', '--posted-after', '--posted-before',
   '--since', '--quiet', '--json', '--help', '-h', '--source-log',
   '--read-pipeline', '--reread', '--gate',
@@ -4711,6 +4753,7 @@ const VALUE_FLAGS = ['--company', '--posted-after', '--posted-before', '--since'
 const USAGE = `Usage:
   node scan.mjs                              # scan all enabled companies
   node scan.mjs --dry-run                    # preview without writing files
+  node scan.mjs --measure-title              # count unique title drops, with no writes or model calls
   node scan.mjs --company Cohere             # scan a single company
   node scan.mjs --verify                     # Playwright-check each new URL; drop expired postings
   node scan.mjs --verify --headed-fallback   # retry anti-bot-blocked URLs in a headed browser (needs a display)
@@ -4732,7 +4775,11 @@ const USAGE = `Usage:
 async function main() {
   const args = process.argv.slice(2);
   validateFlags(args, KNOWN_FLAGS, USAGE, { valueFlags: VALUE_FLAGS });
-  const dryRun = args.includes('--dry-run');
+  const measureTitle = args.includes('--measure-title');
+  const dryRun = args.includes('--dry-run') || measureTitle;
+  if (measureTitle && args.includes('--read-pipeline')) {
+    throw new Error('--measure-title cannot be combined with --read-pipeline');
+  }
   const jsonMode = args.includes('--json');
   if (jsonMode) console.log = console.error.bind(console);
   const verify = args.includes('--verify');
@@ -4822,7 +4869,7 @@ async function main() {
   // Opt-in: merge enabled keyed/auth-gated provider plugins. Returns immediately
   // (no discovery, no dotenv, no process.env mutation) when config/plugins.yml is
   // absent — so a plain scan with no plugins configured stays byte-identical.
-  await mergeProviderPlugins(providers, { root: path.dirname(PROVIDERS_DIR), dryRun });
+  if (!measureTitle) await mergeProviderPlugins(providers, { root: path.dirname(PROVIDERS_DIR), dryRun });
   if (providers.size === 0) {
     console.error('Error: no providers loaded from providers/');
     process.exit(1);
@@ -4910,6 +4957,7 @@ async function main() {
   const companies = Array.isArray(config.tracked_companies) ? config.tracked_companies : [];
   const boards = Array.isArray(config.job_boards) ? config.job_boards : [];
   const titleFilter = buildTitleFilter(config.title_filter);
+  const titleDropReason = buildTitleDropReason(config.title_filter);
 
   // Seniority tier classifier integration
   let classifyTier = null;
@@ -4963,6 +5011,7 @@ async function main() {
   // attributed after the sweep's own scope is gone.
   const sourceByOfferUrl = new Map();
   let skippedCount = 0;
+  let paidSourcesNotRead = 0;
   let boardCount = 0;
   const resolveErrors = [];
   const agentHandoff = [];
@@ -4983,8 +5032,19 @@ async function main() {
       }
       if (filterCompany && !entry.name.toLowerCase().includes(filterCompany)) continue;
 
-      const kind = isBoard ? 'board' : 'company';
-      sourceLedger.register(entry.name, { kind });
+      let kind = String(entry.kind ?? '').trim().toLowerCase() || (isBoard ? 'aggregator' : 'company');
+      if (!['company', 'portfolio', 'aggregator'].includes(kind)) {
+        console.warn(`Unknown source kind "${entry.kind}" for ${entry.name}; using company`);
+        kind = 'company';
+      }
+      sourceLedger.register(entry.name, { kind: isBoard ? 'board' : kind });
+
+      if (measureTitle && entry.provider === 'apify') {
+        paidSourcesNotRead++;
+        sourceLedger.describe(entry.name, { paid: true });
+        sourceLedger.skipped(entry.name, 'paid source not read during title measurement');
+        continue;
+      }
 
       const resolved = resolveProvider(entry, providers);
       if (!resolved) {
@@ -5010,7 +5070,7 @@ async function main() {
       // apify plugin is one that spends money, so the yield and the spend show
       // up in the same glance.
       sourceLedger.describe(entry.name, { paid: resolved.provider.id === 'apify' });
-      targets.push({ ...entry, _provider: resolved.provider, _isBoard: isBoard });
+      targets.push({ ...entry, kind, _provider: resolved.provider, _isBoard: isBoard });
       if (isBoard) boardCount++;
     }
   }
@@ -5024,6 +5084,7 @@ async function main() {
   if (boardCount > 0) parts.push(`${boardCount} job boards`);
   parts.push(`${localParserCount} local parser`);
   parts.push(`${skippedCount} skipped — no provider matched`);
+  if (measureTitle) parts.push(`${paidSourcesNotRead} paid sources not read`);
   console.log(`Scanning ${parts.join('; ')} via providers`);
   if (dryRun) console.log('(dry run — no files will be written)');
 
@@ -5060,7 +5121,7 @@ async function main() {
   const fitPriorCuts = fitSettings.enabled
     ? collectFitCuts(readIfExists(PIPELINE_PATH), { canonicalize: canonicalizeCompany, today: localToday(), rulesChanged: fitSettings.rulesChanged })
     : new Map();
-  const fitGate = fitSettings.enabled ? buildFitGate(fitSettings, { canonicalize: canonicalizeCompany, priorCuts: fitPriorCuts }) : null;
+  const fitGate = !measureTitle && fitSettings.enabled ? buildFitGate(fitSettings, { canonicalize: canonicalizeCompany, priorCuts: fitPriorCuts }) : null;
   if (fitGate) {
     console.log(`Fit gate on: ${fitSettings.model}, effort ${fitSettings.effort}, SKIP switch ${fitSettings.skip ? 'on' : 'off'}, at most ${fitSettings.maxRows} rows and ${Math.round(fitSettings.budgetMs / 60_000)} min`);
   }
@@ -5094,6 +5155,11 @@ async function main() {
   let totalFilteredVisa = 0;
   let totalDupes = 0;
   const newOffers = [];
+  const titleDrops = [];
+  const measureSeen = measureTitle ? titleDropHistoryUrls(SCAN_HISTORY_PATH) : null;
+  const titleMeasure = Object.fromEntries(['company', 'portfolio', 'aggregator'].map(kind => [kind, {
+    total: 0, confirmed: 0, missing_location_only: 0, missing_date_only: 0, missing_both: 0,
+  }]));
   const errors = [...resolveErrors];
   const emptyTargets = [];
 
@@ -5204,11 +5270,6 @@ async function main() {
           }
         }
 
-        if (!titleFilter(job.title)) {
-          totalFilteredTitle++;
-          sourceLedger.drop(company.name, 'title');
-          continue;
-        }
         if (classifyTier && skipTiers.includes(classifyTier(job.title))) {
           totalFilteredTier++;
           sourceLedger.drop(company.name, 'tier');
@@ -5231,6 +5292,28 @@ async function main() {
           sourceLedger.drop(company.name, 'postedDate');
           continue;
         }
+        if (!titleFilter(job.title)) {
+          totalFilteredTitle++;
+          sourceLedger.drop(company.name, 'title');
+          const kind = company.kind || (company._isBoard ? 'aggregator' : 'company');
+          if (measureTitle) {
+            const key = normalizeUrlForDedup(job.url);
+            if (key && !measureSeen.has(key)) {
+              measureSeen.add(key);
+              const counts = titleMeasure[kind];
+              const missingLocation = !String(job.location ?? '').trim() && !locationHintFromUrl(job.url);
+              const missingDate = typeof job.postedAt !== 'number' || !Number.isFinite(job.postedAt);
+              counts.total++;
+              const bucket = missingLocation && missingDate ? 'missing_both'
+                : missingLocation ? 'missing_location_only' : missingDate ? 'missing_date_only' : 'confirmed';
+              counts[bucket]++;
+            }
+          } else {
+            titleDrops.push({ ...job, company: job.company || company.name, kind, reason: titleDropReason(job.title) });
+          }
+          continue;
+        }
+        if (measureTitle) continue;
         if (!salaryFilter(job.salary)) {
           totalFilteredSalary++;
           sourceLedger.drop(company.name, 'salary');
@@ -5434,6 +5517,28 @@ async function main() {
   });
 
   await parallelFetch(tasks, CONCURRENCY);
+
+  if (measureTitle) {
+    console.log('\nTitle drops: unique normalized URLs absent from scan-history (missing-data columns are separate groups).');
+    console.log('kind\ttotal\tconfirmed\tmissing_location_only\tmissing_date_only\tmissing_both');
+    for (const [kind, counts] of Object.entries(titleMeasure)) {
+      console.log([kind, ...Object.values(counts)].join('\t'));
+    }
+    if (jsonMode) emitJsonReceipt({ title_measurement: titleMeasure, dry_run: true,
+      paid_sources_not_read: paidSourcesNotRead,
+      skipped: sourceLedger.records().filter(record => record.status === 'skipped')
+        .map(record => ({ company: record.name, reason: record.detail })),
+      errors: errors.map(({ company, error }) => ({ company, error })),
+    }, errors.length > 0 ? 2 : 0);
+    return;
+  }
+  if (!dryRun) {
+    try {
+      await appendTitleDrops(titleDrops, date);
+    } catch (err) {
+      errors.push({ company: 'title-drops', error: `Could not write title-drops: ${err.message}` });
+    }
+  }
 
   // 5.5. Optional liveness verification — drop expired and guard-rejected postings
   let verifiedOffers = newOffers;
