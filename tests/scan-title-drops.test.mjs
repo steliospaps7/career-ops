@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { acquirePipelineLock } from '../pipeline-lock.mjs';
 import { execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ROOT, NODE } from './helpers.mjs';
@@ -128,16 +130,34 @@ test('retention prunes rows older than 60 days, keeps the boundary, and escapes 
   } finally { cleanup(l); }
 });
 
-test('two concurrent scan processes cannot duplicate or interleave title-drop rows', async () => {
+test('a title-drop writer waits for a held lock and preserves both writers rows', async () => {
   const l = lane();
+  let lock;
   try {
-    await Promise.all([1, 2].map(() => execFileAsync(NODE, [scan], {
-      cwd: ROOT, env: l.env, encoding: 'utf8', timeout: 30000,
-    })));
-    assert.equal(rows(l.drops).length, 2);
-    assert.equal(new Set(rows(l.drops).map(r => normalizeUrlForDedup(r.url))).size, 2);
-    assert.ok(rows(l.drops).every(r => r.reason && r.source_kind === 'company'));
-  } finally { cleanup(l); }
+    const date = '2026-11-19';
+    const first = `${date}\tFirst\tRole\thttps://example.com/first\tLondon\tcompany\tno_positive\n`;
+    writeFileSync(l.drops, TITLE_DROPS_HEADER + first);
+    lock = await acquirePipelineLock(l.drops);
+    const code = `import { appendTitleDrops } from ${JSON.stringify(pathToFileURL(scan).href)};
+      await appendTitleDrops([{ url: 'https://example.com/second', company: 'Second',
+        title: 'Role', location: 'London', kind: 'company', reason: 'no_positive' }],
+        ${JSON.stringify(date)}, ${JSON.stringify({ filePath: l.drops, historyPath: l.history })});`;
+    const write = () => execFileAsync(NODE, ['--input-type=module', '--eval', code], {
+      cwd: ROOT, env: { ...l.env, CAREER_OPS_PIPELINE_LOCK_TIMEOUT_MS: '100',
+        CAREER_OPS_PIPELINE_LOCK_RETRY_MS: '10' }, encoding: 'utf8', timeout: 30000,
+    });
+    // A live owner keeps the second process out until its lock wait times out.
+    await assert.rejects(write(), error => {
+      assert.equal(error.code, 1);
+      assert.match(error.stderr, /pipeline lock timeout/);
+      return true;
+    });
+    assert.equal(readFileSync(l.drops, 'utf8'), TITLE_DROPS_HEADER + first);
+    lock.release();
+    await write();
+    assert.deepEqual(rows(l.drops).map(row => normalizeUrlForDedup(row.url)),
+      ['https://example.com/first', 'https://example.com/second']);
+  } finally { lock?.release(); cleanup(l); }
 });
 
 test('--measure-title and --dry-run do not create any of the three scan files', () => {
