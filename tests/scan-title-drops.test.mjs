@@ -283,3 +283,19 @@ test('an unknown source kind warns once, falls back to company, and still scans'
     assert.ok(rows(l.drops).every(row => row.source_kind === 'company'));
   } finally { cleanup(l); }
 });
+
+
+test('rows with an eighth column survive writes unchanged until their retention date expires', async () => {
+  const l = lane();
+  try {
+    const row = '2026-11-19\tCo\tRole\thttps://example.com/extended\tLondon\tcompany\tno_positive\textra evidence\n';
+    writeFileSync(l.drops, TITLE_DROPS_HEADER + row);
+    await appendTitleDrops([{ url: 'https://example.com/new', company: 'New', title: 'Role',
+      location: 'London', kind: 'company', reason: 'no_positive' }], '2026-11-19',
+    { filePath: l.drops, historyPath: l.history });
+    assert.ok(readFileSync(l.drops, 'utf8').includes(row));
+    assert.equal(rows(l.drops).length, 2);
+    await appendTitleDrops([], '2027-01-19', { filePath: l.drops, historyPath: l.history });
+    assert.equal(readFileSync(l.drops, 'utf8'), TITLE_DROPS_HEADER);
+  } finally { cleanup(l); }
+});

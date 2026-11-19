@@ -3990,7 +3990,7 @@ export async function appendTitleDrops(drops, date, {
     const rows = [];
     for (const line of readIfExists(filePath).split('\n')) {
       const fields = line.split('\t');
-      if (fields.length !== 7 || !(Date.parse(fields[0]) >= cutoff)) continue;
+      if (fields.length < 7 || !(Date.parse(fields[0]) >= cutoff)) continue;
       const key = normalizeUrlForDedup(fields[3]);
       if (!key || seen.has(key)) continue;
       seen.add(key);
