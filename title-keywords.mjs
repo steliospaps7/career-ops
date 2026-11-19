@@ -232,3 +232,17 @@ export function buildTitleFilter(titleFilter) {
     return hasPositive && !hasNegative;
   };
 }
+
+/** Return null for a kept title, otherwise the first veto or no_positive. */
+export function buildTitleDropReason(titleFilter) {
+  const positiveFilter = buildTitleFilter({ positive: titleFilter?.positive });
+  const negative = (Array.isArray(titleFilter?.negative) ? titleFilter.negative : [])
+    .filter(entry => typeof entry === 'string' && entry.trim())
+    .map(entry => ({ entry: entry.trim(), matches: compileKeyword(entry.trim().toLowerCase()) }));
+  return (title) => {
+    const lower = String(title ?? '').toLowerCase();
+    const veto = negative.find(({ matches }) => matches(lower));
+    if (veto) return `negative:${veto.entry}`;
+    return positiveFilter(title) ? null : 'no_positive';
+  };
+}

@@ -1488,6 +1488,7 @@ search_queries:
 #   enabled: true
 #
 # - name: Welcome to the Jungle           # global board via WTTJ's public Algolia index
+#   kind: aggregator
 #   provider: wttj
 #   wttj:
 #     queries: ["ai engineer", "data platform engineer"]  # REQUIRED — the board is global,
@@ -1584,15 +1585,19 @@ search_queries:
 # this out changes nothing.
 #
 #   - name: SomeBoard
+#     kind: portfolio
 #     careers_url: https://jobs.lever.co/someboard
 #     provider: lever
 #     aggregator: true
 
+# kind: company (default), portfolio, or aggregator. Used by title-drop logs
+# and --measure-title; it does not change the title filter or dedup policy.
 tracked_companies:
 
   # -- AI Labs & LLM providers --
 
   - name: Anthropic
+    kind: company
     careers_url: https://job-boards.greenhouse.io/anthropic
     api: https://boards-api.greenhouse.io/v1/boards/anthropic/jobs
     enabled: true
