@@ -217,3 +217,34 @@ test('--measure-title rejects --read-pipeline before it can write', () => {
     for (const file of [l.pipeline, l.history, l.drops]) assert.equal(existsSync(file), false);
   } finally { cleanup(l); }
 });
+
+
+test('an unwritable title-drop path reports an error but still saves pipeline and history rows', () => {
+  const l = lane(MEASURE_PORTALS.split('  - name: Portfolio')[0]);
+  try {
+    const fixture = join(l.root, 'boards.json');
+    writeFileSync(fixture, JSON.stringify({ direct: [
+      { id: 1, title: 'Operations Associate', location: { name: 'London' },
+        absolute_url: 'https://boards.example.com/kept/1', content: '<p>Operations in London.</p>' },
+      { id: 2, title: 'Engineering Intern', location: { name: 'London' },
+        absolute_url: 'https://boards.example.com/dropped/2' },
+    ] }));
+    const blocker = join(l.root, 'not-a-directory');
+    writeFileSync(blocker, 'file');
+    let result;
+    try {
+      run(l, ['--json'], { CAREER_OPS_TITLE_DROPS: join(blocker, 'drops.tsv'),
+        NODE_OPTIONS: `--import=${join(ROOT, 'tests', 'fixtures', 'title-drops-fetch.mjs')}`,
+        TITLE_DROPS_FIXTURE: fixture });
+      assert.fail('the failed log write must appear in the JSON errors');
+    } catch (error) {
+      assert.equal(error.status, 2);
+      result = JSON.parse(error.stdout);
+    }
+    assert.equal(result.added, 1);
+    assert.equal(result.errors.length, 1);
+    assert.match(result.errors[0].error, /title.drops.*(?:ENOTDIR|EEXIST)/i);
+    assert.match(readFileSync(l.pipeline, 'utf8'), /https:\/\/boards.example.com\/kept\/1/);
+    assert.match(readFileSync(l.history, 'utf8'), /https:\/\/boards.example.com\/kept\/1/);
+  } finally { cleanup(l); }
+});

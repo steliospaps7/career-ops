@@ -5522,7 +5522,13 @@ async function main() {
     }, errors.length > 0 ? 2 : 0);
     return;
   }
-  if (!dryRun) await appendTitleDrops(titleDrops, date);
+  if (!dryRun) {
+    try {
+      await appendTitleDrops(titleDrops, date);
+    } catch (err) {
+      errors.push({ company: 'title-drops', error: `Could not write title-drops: ${err.message}` });
+    }
+  }
 
   // 5.5. Optional liveness verification — drop expired and guard-rejected postings
   let verifiedOffers = newOffers;
