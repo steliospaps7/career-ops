@@ -5204,11 +5204,6 @@ async function main() {
           }
         }
 
-        if (!titleFilter(job.title)) {
-          totalFilteredTitle++;
-          sourceLedger.drop(company.name, 'title');
-          continue;
-        }
         if (classifyTier && skipTiers.includes(classifyTier(job.title))) {
           totalFilteredTier++;
           sourceLedger.drop(company.name, 'tier');
@@ -5229,6 +5224,11 @@ async function main() {
         if (!postedDateFilter(job.postedAt)) {
           totalFilteredPostedDate++;
           sourceLedger.drop(company.name, 'postedDate');
+          continue;
+        }
+        if (!titleFilter(job.title)) {
+          totalFilteredTitle++;
+          sourceLedger.drop(company.name, 'title');
           continue;
         }
         if (!salaryFilter(job.salary)) {

@@ -281,10 +281,10 @@ tracked_companies:
 
     const line = (name) => stdout.split('\n').find((l) => l.startsWith(name)) || '';
     // One posting survives; one fails the title filter, one the location
-    // filter, and one repeats a URL already seen in the same sweep.
+    // filter, one fails both, and one repeats a URL already seen in the same sweep.
     const mixed = line('Mixed Board');
-    if (/found 4/.test(mixed) && /kept 1/.test(mixed) && /dropped 3/.test(mixed)
-      && /title 1/.test(mixed) && /location 1/.test(mixed) && /duplicate 1/.test(mixed)) {
+    if (/found 5/.test(mixed) && /kept 1/.test(mixed) && /dropped 4/.test(mixed)
+      && /title 1/.test(mixed) && /location 2/.test(mixed) && /duplicate 1/.test(mixed)) {
       pass('a real scan attributes every posting to one source and one reason');
     } else {
       fail(`Mixed Board line = ${JSON.stringify(mixed)}`);

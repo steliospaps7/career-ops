@@ -10,5 +10,6 @@ console.log(JSON.stringify([
   { title: KEEP, url: 'https://boards.example.com/mixed/1', company: 'Mixed Co', location: 'London, UK' },
   { title: 'Senior Software Engineer', url: 'https://boards.example.com/mixed/2', company: 'Mixed Co', location: 'London, UK' },
   { title: KEEP, url: 'https://boards.example.com/mixed/3', company: 'Mixed Co', location: 'Berlin, Germany' },
+  { title: 'Senior Software Engineer', url: 'https://boards.example.com/mixed/4', company: 'Mixed Co', location: 'Berlin, Germany' },
   { title: KEEP, url: 'https://boards.example.com/mixed/1', company: 'Mixed Co', location: 'London, UK' },
 ]));
