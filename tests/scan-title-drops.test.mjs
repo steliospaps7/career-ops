@@ -18,6 +18,7 @@ const HISTORY_HEADER = 'url\tfirst_seen\tportal\ttitle\tcompany\tstatus\n';
 const PORTALS = `title_filter:
   positive: [Operations Associate, Operations Intern]
   negative: ['word:Intern']
+  block: [Marketplace]
 location_filter:
   allow: [London]
 tracked_companies:
@@ -76,7 +77,7 @@ test('a scan logs both reasons and the default company kind, once across repeate
     const first = readFileSync(l.drops, 'utf8');
     const logged = rows(l.drops);
     assert.equal(logged.length, 2);
-    assert.deepEqual(logged.map(r => r.reason), ['no_positive', 'negative:word:Intern']);
+    assert.deepEqual(logged.map(r => r.reason), ['block:Marketplace', 'negative:word:Intern']);
     assert.equal(logged[0].company, 'Fixture Co');
     assert.equal(logged[0].title, 'Marketplace Operations');
     assert.equal(logged[0].url, 'https://boards.example.com/drops/1');
@@ -219,6 +220,7 @@ test('--measure-title counts unique new URLs by kind and separates missing locat
     assert.equal(receipt.dry_run, true);
     assert.deepEqual(receipt.title_measurement.company, {
       total: 6, confirmed: 2, missing_location_only: 1, missing_date_only: 2, missing_both: 1,
+      block_list_passes: 5,
     });
     for (const kind of ['portfolio', 'aggregator']) {
       assert.deepEqual(receipt.title_measurement[kind], {

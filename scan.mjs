@@ -78,7 +78,7 @@ import {
   advertStatusAt,
   defaultTransports,
 } from './providers/_advert-reader.mjs';
-import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, buildTitleDropReason } from './title-keywords.mjs';
+import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, buildTitleDropReason, buildCompanyTitleDecision } from './title-keywords.mjs';
 import {
   routeDetail,
   routeByTier,
@@ -218,7 +218,7 @@ export function emitJsonReceipt(receipt, exitCode) {
 // sections 11b and 44 among them — keep resolving it from here.
 // compileContentKeyword shares the `word:`/`stem:` prefix machinery but skips
 // the title filter's short-acronym auto-anchor (#3274).
-export { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, buildTitleDropReason };
+export { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, buildTitleDropReason, buildCompanyTitleDecision };
 
 // ── Title filter overrides (per-company broadened title net) ───────
 // Optional. `title_filter_overrides` in portals.yml lets specific companies
@@ -4772,6 +4772,14 @@ const USAGE = `Usage:
   node scan.mjs --quiet                      # suppress the manifesto footer
   node scan.mjs --help                       # print this usage block and exit`;
 
+/** Resolve the title-filter kind for one configured source. */
+export function effectiveSourceKind(entry, { isBoard = false } = {}) {
+  const configured = String(entry?.kind ?? '').trim().toLowerCase();
+  if (configured) return configured;
+  if (isBoard || String(entry?.provider ?? '').trim().toLowerCase() === 'apify') return 'aggregator';
+  return 'company';
+}
+
 async function main() {
   const args = process.argv.slice(2);
   validateFlags(args, KNOWN_FLAGS, USAGE, { valueFlags: VALUE_FLAGS });
@@ -4958,6 +4966,7 @@ async function main() {
   const boards = Array.isArray(config.job_boards) ? config.job_boards : [];
   const titleFilter = buildTitleFilter(config.title_filter);
   const titleDropReason = buildTitleDropReason(config.title_filter);
+  const companyTitleDecision = buildCompanyTitleDecision(config.title_filter);
 
   // Seniority tier classifier integration
   let classifyTier = null;
@@ -5032,7 +5041,7 @@ async function main() {
       }
       if (filterCompany && !entry.name.toLowerCase().includes(filterCompany)) continue;
 
-      let kind = String(entry.kind ?? '').trim().toLowerCase() || (isBoard ? 'aggregator' : 'company');
+      let kind = effectiveSourceKind(entry, { isBoard });
       if (!['company', 'portfolio', 'aggregator'].includes(kind)) {
         console.warn(`Unknown source kind "${entry.kind}" for ${entry.name}; using company`);
         kind = 'company';
@@ -5160,6 +5169,7 @@ async function main() {
   const titleMeasure = Object.fromEntries(['company', 'portfolio', 'aggregator'].map(kind => [kind, {
     total: 0, confirmed: 0, missing_location_only: 0, missing_date_only: 0, missing_both: 0,
   }]));
+  titleMeasure.company.block_list_passes = 0;
   const errors = [...resolveErrors];
   const emptyTargets = [];
 
@@ -5292,28 +5302,38 @@ async function main() {
           sourceLedger.drop(company.name, 'postedDate');
           continue;
         }
-        if (!titleFilter(job.title)) {
+        const kind = company.kind || (company._isBoard ? 'aggregator' : 'company');
+        const legacyTitleReason = titleDropReason(job.title);
+        const decision = kind === 'company'
+          ? companyTitleDecision(job.title)
+          : { keep: titleFilter(job.title), reason: legacyTitleReason, route: null };
+        if (measureTitle && legacyTitleReason !== null) {
           totalFilteredTitle++;
           sourceLedger.drop(company.name, 'title');
-          const kind = company.kind || (company._isBoard ? 'aggregator' : 'company');
-          if (measureTitle) {
-            const key = normalizeUrlForDedup(job.url);
-            if (key && !measureSeen.has(key)) {
-              measureSeen.add(key);
-              const counts = titleMeasure[kind];
-              const missingLocation = !String(job.location ?? '').trim() && !locationHintFromUrl(job.url);
-              const missingDate = typeof job.postedAt !== 'number' || !Number.isFinite(job.postedAt);
-              counts.total++;
-              const bucket = missingLocation && missingDate ? 'missing_both'
-                : missingLocation ? 'missing_location_only' : missingDate ? 'missing_date_only' : 'confirmed';
-              counts[bucket]++;
+          const key = normalizeUrlForDedup(job.url);
+          if (key && !measureSeen.has(key)) {
+            measureSeen.add(key);
+            const counts = titleMeasure[kind];
+            const missingLocation = !String(job.location ?? '').trim() && !locationHintFromUrl(job.url);
+            const missingDate = typeof job.postedAt !== 'number' || !Number.isFinite(job.postedAt);
+            counts.total++;
+            const bucket = missingLocation && missingDate ? 'missing_both'
+              : missingLocation ? 'missing_location_only' : missingDate ? 'missing_date_only' : 'confirmed';
+            counts[bucket]++;
+            if (kind === 'company' && decision.keep && decision.route === 'block_list_pass') {
+              counts.block_list_passes++;
             }
-          } else {
-            titleDrops.push({ ...job, company: job.company || company.name, kind, reason: titleDropReason(job.title) });
           }
           continue;
         }
         if (measureTitle) continue;
+        if (!decision.keep) {
+          totalFilteredTitle++;
+          sourceLedger.drop(company.name, 'title');
+          titleDrops.push({ ...job, company: job.company || company.name, kind, reason: decision.reason });
+          continue;
+        }
+        if (decision.route) job.titleRoute = decision.route;
         if (!salaryFilter(job.salary)) {
           totalFilteredSalary++;
           sourceLedger.drop(company.name, 'salary');
@@ -5522,8 +5542,10 @@ async function main() {
     console.log('\nTitle drops: unique normalized URLs absent from scan-history (missing-data columns are separate groups).');
     console.log('kind\ttotal\tconfirmed\tmissing_location_only\tmissing_date_only\tmissing_both');
     for (const [kind, counts] of Object.entries(titleMeasure)) {
-      console.log([kind, ...Object.values(counts)].join('\t'));
+      console.log([kind, counts.total, counts.confirmed, counts.missing_location_only,
+        counts.missing_date_only, counts.missing_both].join('\t'));
     }
+    console.log(`Company-board block-list passes: ${titleMeasure.company.block_list_passes}`);
     if (jsonMode) emitJsonReceipt({ title_measurement: titleMeasure, dry_run: true,
       paid_sources_not_read: paidSourcesNotRead,
       skipped: sourceLedger.records().filter(record => record.status === 'skipped')

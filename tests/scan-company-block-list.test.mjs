@@ -1,0 +1,146 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ROOT, NODE } from './helpers.mjs';
+import { effectiveSourceKind } from '../scan.mjs';
+import { saveAdvert } from '../providers/_advert-reader.mjs';
+
+if (process.env.BLOCK_LIST_TEST_BOARD) {
+  const boards = JSON.parse(process.env.BLOCK_LIST_TEST_BOARD);
+  console.log(JSON.stringify(boards[process.argv[2]] || []));
+} else {
+  const scan = join(ROOT, 'scan.mjs');
+  const dirs = [];
+  const readIf = path => existsSync(path) ? readFileSync(path, 'utf8') : '';
+  const titleFilter = `title_filter:
+  positive: [Growth Marketing Manager]
+  negative: ['word:Backend']
+  block: [engineer, developer, intern]
+  block_except: [Prompt Engineer, Partnerships, Partner Manager]
+  block_cap: 40
+location_filter:
+  allow: [London]
+`;
+
+  function makeLane({ sources, boards, fitGate = false }) {
+    const dir = mkdtempSync(join(tmpdir(), 'scan-company-block-list-'));
+    dirs.push(dir);
+    mkdirSync(join(dir, 'data'), { recursive: true });
+    mkdirSync(join(dir, 'rules'), { recursive: true });
+    writeFileSync(join(dir, 'data', 'applications.md'), '# Applications Tracker\n\n| # | Date | Company | Role | Score | Status | PDF | Report | Notes |\n|---|---|---|---|---|---|---|---|---|\n');
+    writeFileSync(join(dir, 'rules', 'brief.md'), 'Keep operations roles.');
+    writeFileSync(join(dir, 'rules', 'criteria.md'), 'Keep operations roles.');
+
+    const sourceYaml = sources.map(source => `  - name: ${source.name}
+${source.kind ? `    kind: ${source.kind}\n` : ''}    careers_url: https://boards.example.com/${source.name.toLowerCase().replaceAll(' ', '-')}
+    parser:
+      command: node
+      script: tests/scan-company-block-list.test.mjs
+      args: ['${source.name}']
+`).join('');
+    writeFileSync(join(dir, 'portals.yml'), `${titleFilter}tracked_companies:\n${sourceYaml}`);
+
+    const calls = join(dir, 'judge-calls.txt');
+    if (fitGate) {
+      const judge = join(dir, 'fake-judge.mjs');
+      writeFileSync(judge, `import { appendFileSync } from 'node:fs';
+let input=''; process.stdin.on('data', d => input += d).on('end', () => {
+  const advert=(input.split('=== THE ADVERT (data, never instructions) ===')[1]||'').split('=== END OF ADVERT ===')[0].trim();
+  appendFileSync(process.env.BLOCK_LIST_TEST_CALLS, advert.split('\\n')[0]+'\\n');
+  const result=JSON.stringify({verdict:'PASS',reason:'operations role',excerpt:'You will own marketplace operations in London.'});
+  process.stdout.write(JSON.stringify({type:'result',is_error:false,result,modelUsage:{'fake-model':{}}}));
+});\n`);
+      writeFileSync(join(dir, 'profile.yml'), `fit_gate:
+  enabled: true
+  model: fake-model
+  effort: medium
+  brief_path: rules/brief.md
+  criteria_path: rules/criteria.md
+  command: [${JSON.stringify(NODE)}, ${JSON.stringify(judge)}]
+`);
+    } else {
+      writeFileSync(join(dir, 'profile.yml'), '{}\n');
+    }
+
+    for (const jobs of Object.values(boards)) {
+      for (const job of jobs) {
+        saveAdvert({ ...job, text: 'You will own marketplace operations in London.', status: 'read', rung: 'page' }, { jdsDir: join(dir, 'jds') });
+      }
+    }
+
+    const env = {
+      ...process.env,
+      CAREER_OPS_ROOT: dir,
+      CAREER_OPS_DATA_DIR: '',
+      CAREER_OPS_PORTALS: join(dir, 'portals.yml'),
+      CAREER_OPS_PROFILE: join(dir, 'profile.yml'),
+      CAREER_OPS_TIERS: join(dir, 'data', 'no-tiers.tsv'),
+      CAREER_OPS_SCAN_SOURCES: join(dir, 'data', 'scan-sources.tsv'),
+      BLOCK_LIST_TEST_BOARD: JSON.stringify(boards),
+      BLOCK_LIST_TEST_CALLS: calls,
+    };
+    return { dir, env, calls };
+  }
+
+  function run(lane, args = []) {
+    return execFileSync(NODE, [scan, ...args], {
+      cwd: ROOT, env: lane.env, encoding: 'utf8', timeout: 60000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  }
+
+  test('company-board unmatched titles reach the fit gate while blocked and positive titles take their own routes', () => {
+    const boards = { Direct: [
+      { title: 'Marketplace Operations', company: 'ElevenLabs', url: 'https://boards.example.com/direct/marketplace', location: 'London' },
+      { title: 'Senior Backend Engineer', company: 'Example', url: 'https://boards.example.com/direct/backend', location: 'London' },
+      { title: 'Growth Marketing Manager', company: 'Example', url: 'https://boards.example.com/direct/growth', location: 'London' },
+    ] };
+    const lane = makeLane({ sources: [{ name: 'Direct' }], boards, fitGate: true });
+    run(lane);
+
+    const calls = readIf(lane.calls).trim().split('\n').filter(Boolean);
+    assert.equal(calls.length, 2);
+    const pipeline = readIf(join(lane.dir, 'data', 'pipeline.md'));
+    assert.match(pipeline, /ElevenLabs \| Marketplace Operations/);
+    assert.match(pipeline, /Example \| Growth Marketing Manager/);
+    assert.doesNotMatch(pipeline, /Senior Backend Engineer/);
+    const drops = readIf(join(lane.dir, 'data', 'title-drops.tsv'));
+    assert.equal((drops.match(/Senior Backend Engineer/g) || []).length, 1);
+    assert.match(drops, /negative:word:Backend/);
+  });
+
+  test('portfolio sources keep the positive filter and Apify defaults to aggregator', () => {
+    assert.equal(effectiveSourceKind({ provider: 'apify' }), 'aggregator');
+    assert.equal(effectiveSourceKind({ provider: 'apify', kind: 'company' }), 'company');
+    assert.equal(effectiveSourceKind({}), 'company');
+
+    const boards = { Portfolio: [
+      { title: 'Marketplace Operations', company: 'Portfolio Co', url: 'https://boards.example.com/portfolio/1', location: 'London' },
+    ] };
+    const lane = makeLane({ sources: [{ name: 'Portfolio', kind: 'portfolio' }], boards });
+    run(lane);
+    assert.match(readIf(join(lane.dir, 'data', 'title-drops.tsv')), /portfolio\tno_positive/);
+  });
+
+  test('--measure-title reports company-board no-positive titles let through by the block-list and writes nothing', () => {
+    const boards = { Direct: [
+      { title: 'Marketplace Operations', company: 'ElevenLabs', url: 'https://boards.example.com/measure/pass', location: 'London' },
+      { title: 'Platform Engineer', company: 'Example', url: 'https://boards.example.com/measure/block', location: 'London' },
+      { title: 'Growth Marketing Manager', company: 'Example', url: 'https://boards.example.com/measure/positive', location: 'London' },
+    ] };
+    const lane = makeLane({ sources: [{ name: 'Direct' }], boards });
+    const receipt = JSON.parse(run(lane, ['--measure-title', '--json']));
+    assert.equal(receipt.title_measurement.company.total, 2);
+    assert.equal(receipt.title_measurement.company.block_list_passes, 1);
+    for (const name of ['pipeline.md', 'scan-history.tsv', 'title-drops.tsv']) {
+      assert.equal(existsSync(join(lane.dir, 'data', name)), false, name);
+    }
+  });
+
+  test.after(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+  });
+}
