@@ -25,7 +25,7 @@ location_filter:
   allow: [London]
 `;
 
-  function makeLane({ sources, boards, fitGate = false }) {
+  function makeLane({ sources, boards, fitGate = false, blockCap = 40 }) {
     const dir = mkdtempSync(join(tmpdir(), 'scan-company-block-list-'));
     dirs.push(dir);
     mkdirSync(join(dir, 'data'), { recursive: true });
@@ -41,7 +41,7 @@ ${source.kind ? `    kind: ${source.kind}\n` : ''}    careers_url: https://board
       script: tests/scan-company-block-list.test.mjs
       args: ['${source.name}']
 `).join('');
-    writeFileSync(join(dir, 'portals.yml'), `${titleFilter}tracked_companies:\n${sourceYaml}`);
+    writeFileSync(join(dir, 'portals.yml'), `${titleFilter.replace('block_cap: 40', `block_cap: ${blockCap}`)}tracked_companies:\n${sourceYaml}`);
 
     const calls = join(dir, 'judge-calls.txt');
     if (fitGate) {
@@ -138,6 +138,70 @@ let input=''; process.stdin.on('data', d => input += d).on('end', () => {
     for (const name of ['pipeline.md', 'scan-history.tsv', 'title-drops.tsv']) {
       assert.equal(existsSync(join(lane.dir, 'data', name)), false, name);
     }
+  });
+
+  test('the cap sends 40 block-list passes, holds five untouched, then sends those five next run', () => {
+    const jobs = Array.from({ length: 45 }, (_, index) => ({
+      title: `Marketplace Operations ${index + 1}`,
+      company: 'Example',
+      url: `https://boards.example.com/cap/${index + 1}`,
+      location: 'London',
+    }));
+    const lane = makeLane({ sources: [{ name: 'Direct' }], boards: { Direct: jobs } });
+    const first = run(lane);
+    assert.match(first, /Block-list passes:\s+40 sent on, 5 held for the next run \(cap 40\)/);
+
+    const pipelinePath = join(lane.dir, 'data', 'pipeline.md');
+    const historyPath = join(lane.dir, 'data', 'scan-history.tsv');
+    const dropsPath = join(lane.dir, 'data', 'title-drops.tsv');
+    const firstPipeline = readIf(pipelinePath);
+    const firstHistory = readIf(historyPath);
+    assert.equal((firstPipeline.match(/https:\/\/boards\.example\.com\/cap\//g) || []).length, 40);
+    assert.equal((firstHistory.match(/https:\/\/boards\.example\.com\/cap\//g) || []).length, 40);
+    assert.equal(existsSync(dropsPath), false);
+    for (const id of [41, 42, 43, 44, 45]) {
+      assert.doesNotMatch(firstPipeline, new RegExp(`/cap/${id}(?:\\s|$)`));
+      assert.doesNotMatch(firstHistory, new RegExp(`/cap/${id}(?:\\s|$)`));
+    }
+
+    const runs = readIf(join(lane.dir, 'data', 'scan-runs.tsv')).trim().split('\n');
+    const header = runs[0].split('\t');
+    const values = runs[1].split('\t');
+    assert.equal(values[header.indexOf('block_list_passes_sent')], '40');
+    assert.equal(values[header.indexOf('block_list_passes_held')], '5');
+
+    const second = run(lane);
+    assert.match(second, /Block-list passes:\s+5 sent on, 0 held for the next run \(cap 40\)/);
+    assert.equal((readIf(pipelinePath).match(/https:\/\/boards\.example\.com\/cap\//g) || []).length, 45);
+    assert.equal((readIf(historyPath).match(/https:\/\/boards\.example\.com\/cap\//g) || []).length, 45);
+  });
+
+  test('cap zero holds block-list passes but positive titles still continue', () => {
+    const boards = { Direct: [
+      { title: 'Marketplace Operations', company: 'Example', url: 'https://boards.example.com/zero/1', location: 'London' },
+      { title: 'Partnership Success', company: 'Example', url: 'https://boards.example.com/zero/2', location: 'London' },
+      { title: 'Growth Marketing Manager', company: 'Example', url: 'https://boards.example.com/zero/positive', location: 'London' },
+    ] };
+    const lane = makeLane({ sources: [{ name: 'Direct' }], boards, blockCap: 0 });
+    const output = run(lane);
+    assert.match(output, /Block-list passes:\s+0 sent on, 2 held for the next run \(cap 0\)/);
+    const pipeline = readIf(join(lane.dir, 'data', 'pipeline.md'));
+    assert.match(pipeline, /Growth Marketing Manager/);
+    assert.doesNotMatch(pipeline, /Marketplace Operations|Partnership Success/);
+    assert.equal(existsSync(join(lane.dir, 'data', 'title-drops.tsv')), false);
+  });
+
+  test('a block-list pass already in scan history uses no cap slot', () => {
+    const boards = { Direct: [
+      { title: 'Marketplace Operations', company: 'Example', url: 'https://boards.example.com/history/old', location: 'London' },
+      { title: 'Partnership Success', company: 'Example', url: 'https://boards.example.com/history/new', location: 'London' },
+    ] };
+    const lane = makeLane({ sources: [{ name: 'Direct' }], boards, blockCap: 1 });
+    writeFileSync(join(lane.dir, 'data', 'scan-history.tsv'),
+      'url\tfirst_seen\tportal\ttitle\tcompany\tstatus\nhttps://boards.example.com/history/old\t2026-11-20\tfixture\tMarketplace Operations\tExample\tadded\n');
+    const output = run(lane);
+    assert.match(output, /Block-list passes:\s+1 sent on, 0 held for the next run \(cap 1\)/);
+    assert.match(readIf(join(lane.dir, 'data', 'pipeline.md')), /history\/new/);
   });
 
   test.after(() => {

@@ -4146,7 +4146,7 @@ const SCAN_RUNS_PATH = path.join(DATA_ROOT, 'data/scan-runs.tsv');
 // writeRunFailureRow (#2643) so trend stats can exclude survivorship bias.
 // Consumers MUST parse by header name, never by position — columns may be
 // appended in later versions.
-export const SCAN_RUNS_HEADER = 'timestamp\tstatus\tcompanies\tboards\tfound\tfiltered_title\tfiltered_tier\tfiltered_location\tfiltered_posting_age\tfiltered_salary\tfiltered_content\tfiltered_cooldown\tdupes\tnew_added\terrors\tfiltered_blacklist\tfiltered_visa\tfiltered_posted_date\tfiltered_country_eligibility\n';
+export const SCAN_RUNS_HEADER = 'timestamp\tstatus\tcompanies\tboards\tfound\tfiltered_title\tfiltered_tier\tfiltered_location\tfiltered_posting_age\tfiltered_salary\tfiltered_content\tfiltered_cooldown\tdupes\tnew_added\terrors\tfiltered_blacklist\tfiltered_visa\tfiltered_posted_date\tfiltered_country_eligibility\tblock_list_passes_sent\tblock_list_passes_held\n';
 
 // Failure-path writes (#2643). main() registers a snapshot closure once the
 // sweep's counters exist (never on --dry-run, never before the sweep starts —
@@ -4236,6 +4236,8 @@ export function appendScanRunSummary(c, filePath = SCAN_RUNS_PATH) {
     c.filteredPostedDate ?? 0,
     // filtered_country_eligibility (#2093) appended at the END for the same reason.
     c.filteredCountryEligibility ?? 0,
+    c.blockListPassesSent ?? 0,
+    c.blockListPassesHeld ?? 0,
   ].join('\t') + '\n';
   appendFileSync(filePath, row, 'utf-8');
 }
@@ -4263,6 +4265,7 @@ export const SOURCE_DROP_REASONS = [
   { key: 'location', label: 'location' },
   { key: 'age', label: 'age' },
   { key: 'postedDate', label: 'posted date' },
+  { key: 'blockHeld', label: 'block-list cap' },
   { key: 'salary', label: 'salary' },
   // The reader runs here, between the free filters and the three that read the
   // advert. A posting whose own board page says it is gone is dropped rather
@@ -4967,6 +4970,9 @@ async function main() {
   const titleFilter = buildTitleFilter(config.title_filter);
   const titleDropReason = buildTitleDropReason(config.title_filter);
   const companyTitleDecision = buildCompanyTitleDecision(config.title_filter);
+  const blockListCap = Number.isInteger(config.title_filter?.block_cap) && config.title_filter.block_cap >= 0
+    ? config.title_filter.block_cap
+    : 40;
 
   // Seniority tier classifier integration
   let classifyTier = null;
@@ -5117,6 +5123,7 @@ async function main() {
   const dedupIncludeLocation = resolveDedupIncludeLocation(config);
   const dedupSnapshot = loadDedupSnapshot(historyPolicy, canonicalizeCompany, { includeLocation: dedupIncludeLocation });
   const seenUrls = dedupSnapshot.seen;
+  const blockListRunUrls = new Set();
   const seenCompanyRoles = dedupSnapshot.seenCompanyRoles;
   const seenCompanyRoleBases = dedupSnapshot.seenCompanyRoleBases ?? new Set();
 
@@ -5163,6 +5170,8 @@ async function main() {
   let annotatedBlacklisted = 0;
   let totalFilteredVisa = 0;
   let totalDupes = 0;
+  let totalBlockListPassesSent = 0;
+  let totalBlockListPassesHeld = 0;
   const newOffers = [];
   const titleDrops = [];
   const measureSeen = measureTitle ? titleDropHistoryUrls(SCAN_HISTORY_PATH) : null;
@@ -5190,6 +5199,8 @@ async function main() {
       errors: errors.length, filteredBlacklist: totalFilteredBlacklist,
       filteredVisa: totalFilteredVisa, filteredPostedDate: totalFilteredPostedDate,
       filteredCountryEligibility: totalFilteredCountryEligibility,
+      blockListPassesSent: totalBlockListPassesSent,
+      blockListPassesHeld: totalBlockListPassesHeld,
     }), (timestamp) => appendScanSources(sourceLedger.records(), timestamp, sourceLogPath));
     // Ctrl-C mid-sweep is the common abort. Best effort: record, then die
     // with the conventional SIGINT code.
@@ -5333,7 +5344,22 @@ async function main() {
           titleDrops.push({ ...job, company: job.company || company.name, kind, reason: decision.reason });
           continue;
         }
-        if (decision.route) job.titleRoute = decision.route;
+        if (decision.route) {
+          const earlyDedupUrl = normalizeUrlForDedup(job.url);
+          if (seenUrls.has(earlyDedupUrl) || blockListRunUrls.has(earlyDedupUrl)) {
+            totalDupes++;
+            sourceLedger.drop(company.name, 'duplicate');
+            continue;
+          }
+          blockListRunUrls.add(earlyDedupUrl);
+          if (totalBlockListPassesSent >= blockListCap) {
+            totalBlockListPassesHeld++;
+            sourceLedger.drop(company.name, 'blockHeld');
+            continue;
+          }
+          totalBlockListPassesSent++;
+          job.titleRoute = decision.route;
+        }
         if (!salaryFilter(job.salary)) {
           totalFilteredSalary++;
           sourceLedger.drop(company.name, 'salary');
@@ -5614,6 +5640,7 @@ async function main() {
     advertEmpty: totalFilteredAdvertEmpty,
     content: totalFilteredContent,
     countryEligibility: totalFilteredCountryEligibility,
+    blockHeld: totalBlockListPassesHeld,
     visa: totalFilteredVisa,
     duplicate: totalDupes,
     cooldown: totalFilteredCooldown,
@@ -5736,6 +5763,9 @@ async function main() {
   }
   if (Object.keys(windows).length > 0 || totalFilteredCooldown > 0) {
     console.log(`Filtered by cooldown:  ${totalFilteredCooldown} removed`);
+  }
+  if (Array.isArray(config.title_filter?.block) || totalBlockListPassesSent > 0 || totalBlockListPassesHeld > 0) {
+    console.log(`Block-list passes:     ${totalBlockListPassesSent} sent on, ${totalBlockListPassesHeld} held for the next run (cap ${blockListCap})`);
   }
   console.log(`Duplicates:            ${totalDupes} skipped`);
   // The read (ticket B1). Printed whenever the reader was asked for anything,
@@ -5967,6 +5997,8 @@ async function main() {
       filteredVisa: totalFilteredVisa,
       filteredPostedDate: totalFilteredPostedDate,
       filteredCountryEligibility: totalFilteredCountryEligibility,
+      blockListPassesSent: totalBlockListPassesSent,
+      blockListPassesHeld: totalBlockListPassesHeld,
     });
   }
   // The run completed (or was a dry run) — disarm the failure row.
@@ -5979,7 +6011,7 @@ async function main() {
     const filtered = totalFilteredTitle + totalFilteredTier + totalFilteredLocation
       + totalFilteredPostingAge + totalFilteredPostedDate + totalFilteredSalary
       + totalFilteredContent + totalFilteredCountryEligibility + totalFilteredBlacklist
-      + totalFilteredVisa + totalFilteredCooldown + totalFilteredFit;
+      + totalFilteredVisa + totalFilteredCooldown + totalFilteredFit + totalBlockListPassesHeld;
     emitJsonReceipt({
       version: 'careerops.scan.receipt@1',
       date,
@@ -5990,6 +6022,8 @@ async function main() {
       duplicates: totalDupes,
       added: verifiedOffers.length,
       added_urls: verifiedOffers.map(offer => offer.url),
+      block_list_passes_sent: totalBlockListPassesSent,
+      block_list_passes_held: totalBlockListPassesHeld,
       errors: errors.map(({ company, error }) => ({ company, error })),
       dry_run: dryRun,
     }, errors.length > 0 ? 2 : 0);

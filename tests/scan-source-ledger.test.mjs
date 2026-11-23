@@ -67,7 +67,7 @@ const {
   const keys = SOURCE_DROP_REASONS.map((r) => r.key);
   const expected = [
     'blacklist', 'title', 'tier', 'location', 'age', 'postedDate',
-    'salary',
+    'blockHeld', 'salary',
     // The advert reader runs here, between the free filters and the three that
     // read the advert, and drops a posting whose own board page says it is gone.
     'advertExpired',
@@ -234,6 +234,7 @@ const {
   const PORTALS = `title_filter:
   positive:
     - "Operations Associate"
+  block: ["engineer"]
 location_filter:
   allow:
     - "London"
