@@ -263,6 +263,15 @@ export function buildCompanyTitleDecision(titleFilter) {
     .map(entry => ({ entry: entry.trim(), matches: compile(entry.trim().toLowerCase()) }));
   const wholeWord = keyword => compileKeyword(keyword.startsWith(WORD_PREFIX) ? keyword : `${WORD_PREFIX}${keyword}`);
   const positive = entries(titleFilter?.positive, compilePositiveKeyword);
+  if (!Array.isArray(titleFilter?.block) || positive.length === 0) {
+    const titleFilterLegacy = buildTitleFilter(titleFilter);
+    const titleDropReasonLegacy = buildTitleDropReason(titleFilter);
+    return title => ({
+      keep: titleFilterLegacy(title),
+      reason: titleDropReasonLegacy(title),
+      route: null,
+    });
+  }
   const negative = entries(titleFilter?.negative, compileKeyword);
   const block = entries(titleFilter?.block, wholeWord);
   const except = entries(titleFilter?.block_except, wholeWord);

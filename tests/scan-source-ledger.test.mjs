@@ -234,7 +234,6 @@ const {
   const PORTALS = `title_filter:
   positive:
     - "Operations Associate"
-  block: ["engineer"]
 location_filter:
   allow:
     - "London"
