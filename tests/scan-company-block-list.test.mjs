@@ -87,7 +87,7 @@ let input=''; process.stdin.on('data', d => input += d).on('end', () => {
 
   function run(lane, args = []) {
     return execFileSync(NODE, [scan, ...args], {
-      cwd: ROOT, env: lane.env, encoding: 'utf8', timeout: 60000,
+      cwd: lane.dir, env: lane.env, encoding: 'utf8', timeout: 60000,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
   }
@@ -123,6 +123,35 @@ let input=''; process.stdin.on('data', d => input += d).on('end', () => {
     const lane = makeLane({ sources: [{ name: 'Portfolio', kind: 'portfolio' }], boards });
     run(lane);
     assert.match(readIf(join(lane.dir, 'data', 'title-drops.tsv')), /portfolio\tno_positive/);
+  });
+
+  test('an Apify source without kind keeps aggregator title filtering and logging', () => {
+    const lane = makeLane({ sources: [], boards: {} });
+    mkdirSync(join(lane.dir, 'config'), { recursive: true });
+    writeFileSync(join(lane.dir, 'config', 'plugins.yml'), 'plugins:\n  apify:\n    enabled: true\n');
+    writeFileSync(join(lane.dir, 'portals.yml'), `${titleFilter}tracked_companies:
+  - name: Paid Search
+    provider: apify
+    actor: fixture/actor
+    input: {}
+    field_map:
+      title: title
+      url: url
+      company: company
+      location: location
+      description: description
+`);
+    lane.env.APIFY_TOKEN = 'test-token';
+    lane.env.NODE_OPTIONS = `--import=${join(ROOT, 'tests', 'fixtures', 'block-list-apify-fetch.mjs')}`;
+    lane.env.BLOCK_LIST_APIFY_ITEMS = JSON.stringify([{
+      title: 'Marketplace Operations',
+      url: 'https://paid.example.com/jobs/1',
+      company: 'Paid Co',
+      location: 'London',
+      description: 'You will own marketplace operations in London and work across the company.',
+    }]);
+    run(lane);
+    assert.match(readIf(join(lane.dir, 'data', 'title-drops.tsv')), /aggregator\tno_positive/);
   });
 
   test('--measure-title reports company-board no-positive titles let through by the block-list and writes nothing', () => {
