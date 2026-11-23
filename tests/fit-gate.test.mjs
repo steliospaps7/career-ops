@@ -693,7 +693,10 @@ process.stdin.on('data', (d) => { input += d; }).on('end', () => {
     eq('enabled: false writes the same queue as a profile with no fit_gate key', pOff, pNone);
     const strip = (tsv) => tsv.split('\n').map((l) => l.split('\t').slice(0, 7).join('\t')).join('\n');
     eq('and the same scan history', strip(readIf(join(off.dir, 'data', 'scan-history.tsv'))), strip(readIf(join(none.dir, 'data', 'scan-history.tsv'))));
-    eq('and prints the same output', outOff.replaceAll(off.dir, '<dir>'), outNone.replaceAll(none.dir, '<dir>'));
+    const stableOutput = (text, dir) => text.replaceAll(dir, '<dir>').split('\n')
+      .filter(line => !line.startsWith('◇ injected env'))
+      .join('\n');
+    eq('and prints the same output', stableOutput(outOff, off.dir), stableOutput(outNone, none.dir));
     ok('with no fit: segment, no Fit gate line and no call', !pOff.includes('fit:') && !outOff.includes('Fit gate') && !existsSync(off.calls));
     ok('and the unread row routed review as C2 left it, the rest standard', (pOff.match(/route: review/g) || []).length === 1 && (pOff.match(/route: standard/g) || []).length === 6);
   } catch (err) {

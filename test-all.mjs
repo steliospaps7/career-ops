@@ -17411,15 +17411,15 @@ try {
     filteredTitle: 40, filteredTier: 5, filteredLocation: 20, filteredPostingAge: 3, filteredSalary: 2,
     filteredContent: 6, filteredCooldown: 1, dupes: 38, newAdded: 8, errors: 0,
     filteredBlacklist: 4, filteredVisa: 7, filteredPostedDate: 2,
+    blockListPassesSent: 3, blockListPassesHeld: 2,
   };
   appendScanRunSummary(counters, runsFile);
   appendScanRunSummary({ ...counters, timestamp: '2026-07-04T09:00:00Z' }, runsFile);
   const runRows = readFileSync(runsFile, 'utf-8').trim().split('\n');
   if (runRows[0] === SCAN_RUNS_HEADER.trim() && runRows.length === 3
       && runRows[1].startsWith('2026-07-03T14:02:11Z\tcompleted\t45\t3\t120\t')
-      // filtered_blacklist + filtered_visa + filtered_posted_date + filtered_country_eligibility
-      // land in the four trailing columns (last defaults to 0 — not supplied above).
-      && runRows[1].endsWith('\t4\t7\t2\t0')
+      // The four filter counters and the two block-list pass counters are trailing.
+      && runRows[1].endsWith('\t4\t7\t2\t0\t3\t2')
       && runRows[2].startsWith('2026-07-04T09:00:00Z\t')) {
     pass('appendScanRunSummary writes the header once, appends one row per run');
   } else {
