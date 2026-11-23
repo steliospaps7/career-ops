@@ -306,7 +306,7 @@ export function createFitGate({ settings, rules, rulesError = '', judge, canonic
     if (outcome.failed) tally.failed++;
     if (outcome.ceiling) tally.ceilingHits++;
     if (outcome.verdict !== 'PASS') {
-      tally.rows.push({ company: row.company || '', title: row.title || '', ...outcome });
+      tally.rows.push({ company: row.company || '', title: row.title || '', titleRoute: row.titleRoute || '', ...outcome });
     }
     return outcome;
   }
@@ -316,7 +316,7 @@ export function createFitGate({ settings, rules, rulesError = '', judge, canonic
   /**
    * One row. Never throws: every failure comes back as REVIEW.
    *
-   * @param {{company: string, title: string, advert: string, readStatus?: string|null}} row
+   * @param {{company: string, title: string, advert: string, readStatus?: string|null, titleRoute?: string}} row
    */
   async function assess(row) {
     // A repeat of the gate's own cut, before anything that could spend a call.
@@ -485,7 +485,8 @@ export function formatFitSummary(gate) {
       ? ` | kept in the Inbox: ${row.allowed ? 'always_allow' : 'SKIP switch off'}`
       : '';
     const excerpt = row.excerpt ? ` | "${row.excerpt}"` : '';
-    lines.push(`FIT ${row.verdict} | ${row.company || '?'} | ${row.title || '?'} | ${row.reason}${excerpt}${held}`);
+    const titleRoute = row.titleRoute === 'block_list_pass' ? ' | title: block-list' : '';
+    lines.push(`FIT ${row.verdict} | ${row.company || '?'} | ${row.title || '?'} | ${row.reason}${excerpt}${held}${titleRoute}`);
   }
   for (const retry of tally.retries) {
     const said = retry.sample ? ` | the judge said: "${retry.sample}"` : '';

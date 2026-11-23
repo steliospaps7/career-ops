@@ -496,6 +496,47 @@ title_filter:
     # - "Product Marketing"
     # - "Content Marketing"
     # - "Brand Manager"
+  # Direct company boards let titles with no positive match continue unless one
+  # of these whole-word entries matches. Portfolio and aggregator feeds keep the
+  # positive filter above. Existing negative entries still veto every source.
+  block:
+    - "engineer"
+    - "engineering"
+    - "developer"
+    - "scientist"
+    - "researcher"
+    - "machine learning"
+    - "legal"
+    - "counsel"
+    - "lawyer"
+    - "paralegal"
+    - "accountant"
+    - "accounting"
+    - "tax"
+    - "payroll"
+    - "auditor"
+    - "sales development"
+    - "SDR"
+    - "BDR"
+    - "account executive"
+    - "designer"
+    - "recruiter"
+    - "nurse"
+    - "clinician"
+    - "doctor"
+    - "pharmacist"
+    - "warehouse"
+    - "driver"
+    - "technician"
+    - "intern"
+  # Exceptions use the same whole-word matching and win over block entries.
+  block_except:
+    - "Prompt Engineer"
+    - "Partnerships"
+    - "Partner Manager"
+  # At most this many no-positive company-board titles continue per scan. Set
+  # to 0 to hold all of them for the next run. The default is 40 when omitted.
+  block_cap: 40
   negative:
     # [CUSTOMIZE] Add keywords for roles you want to exclude
     - "Junior"

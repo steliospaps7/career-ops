@@ -119,6 +119,8 @@ test('--json emits exactly one clean successful receipt', () => {
       duplicates: 0,
       added: 0,
       added_urls: [],
+      block_list_passes_sent: 0,
+      block_list_passes_held: 0,
       errors: [],
       dry_run: true,
     });

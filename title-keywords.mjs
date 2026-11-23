@@ -246,3 +246,45 @@ export function buildTitleDropReason(titleFilter) {
     return positiveFilter(title) ? null : 'no_positive';
   };
 }
+
+/**
+ * Decide a title from a direct company board.
+ *
+ * Negative entries keep their existing veto. A positive match keeps its
+ * existing priority. Only a title with no positive match reaches the new
+ * whole-word block list, where an exception wins over a block.
+ *
+ * @param {{positive?: unknown, negative?: unknown, block?: unknown, block_except?: unknown}} [titleFilter]
+ * @returns {(title: string) => {keep: boolean, reason: string|null, route: string|null}}
+ */
+export function buildCompanyTitleDecision(titleFilter) {
+  const entries = (value, compile) => (Array.isArray(value) ? value : [])
+    .filter(entry => typeof entry === 'string' && entry.trim())
+    .map(entry => ({ entry: entry.trim(), matches: compile(entry.trim().toLowerCase()) }));
+  const wholeWord = keyword => compileKeyword(keyword.startsWith(WORD_PREFIX) ? keyword : `${WORD_PREFIX}${keyword}`);
+  const positive = entries(titleFilter?.positive, compilePositiveKeyword);
+  if (!Array.isArray(titleFilter?.block) || positive.length === 0) {
+    const titleFilterLegacy = buildTitleFilter(titleFilter);
+    const titleDropReasonLegacy = buildTitleDropReason(titleFilter);
+    return title => ({
+      keep: titleFilterLegacy(title),
+      reason: titleDropReasonLegacy(title),
+      route: null,
+    });
+  }
+  const negative = entries(titleFilter?.negative, compileKeyword);
+  const block = entries(titleFilter?.block, wholeWord);
+  const except = entries(titleFilter?.block_except, wholeWord);
+
+  return (title) => {
+    const lower = String(title ?? '').toLowerCase();
+    const veto = negative.find(({ matches }) => matches(lower));
+    if (veto) return { keep: false, reason: `negative:${veto.entry}`, route: null };
+    if (positive.some(({ matches }) => matches(lower))) return { keep: true, reason: null, route: null };
+    const blocked = block.find(({ matches }) => matches(lower));
+    if (!blocked || except.some(({ matches }) => matches(lower))) {
+      return { keep: true, reason: null, route: 'block_list_pass' };
+    }
+    return { keep: false, reason: `block:${blocked.entry}`, route: null };
+  };
+}

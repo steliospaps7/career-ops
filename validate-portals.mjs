@@ -134,6 +134,18 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
       validateKeywordList(config.title_filter.positive, 'title_filter.positive', errors);
       validateKeywordList(config.title_filter.negative, 'title_filter.negative', errors);
       validateKeywordList(config.title_filter.seniority_boost, 'title_filter.seniority_boost', errors);
+      for (const key of ['block', 'block_except']) {
+        const value = config.title_filter[key];
+        if (value !== undefined && value !== null && !Array.isArray(value)) {
+          add(errors, `title_filter.${key}`, 'must be an array when set');
+        } else {
+          validateKeywordList(value, `title_filter.${key}`, errors);
+        }
+      }
+      if (config.title_filter.block_cap !== undefined
+        && (!Number.isInteger(config.title_filter.block_cap) || config.title_filter.block_cap < 0)) {
+        add(errors, 'title_filter.block_cap', 'must be a non-negative integer when set');
+      }
     }
   }
 

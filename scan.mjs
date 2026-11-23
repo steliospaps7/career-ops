@@ -78,7 +78,7 @@ import {
   advertStatusAt,
   defaultTransports,
 } from './providers/_advert-reader.mjs';
-import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, buildTitleDropReason } from './title-keywords.mjs';
+import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, buildTitleDropReason, buildCompanyTitleDecision } from './title-keywords.mjs';
 import {
   routeDetail,
   routeByTier,
@@ -218,7 +218,7 @@ export function emitJsonReceipt(receipt, exitCode) {
 // sections 11b and 44 among them — keep resolving it from here.
 // compileContentKeyword shares the `word:`/`stem:` prefix machinery but skips
 // the title filter's short-acronym auto-anchor (#3274).
-export { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, buildTitleDropReason };
+export { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, buildTitleDropReason, buildCompanyTitleDecision };
 
 // ── Title filter overrides (per-company broadened title net) ───────
 // Optional. `title_filter_overrides` in portals.yml lets specific companies
@@ -2931,7 +2931,9 @@ export function formatPipelineOffer(offer) {
   // confusing it for a positional cell, and it stays generic: nothing here is
   // source-specific, and an offer without `note` produces byte-identical output.
   const note = typeof offer.note === 'string' ? sanitizeMarkdownField(offer.note) : '';
-  return note ? `${line} | note: ${note}` : line;
+  if (note) line = `${line} | note: ${note}`;
+  if (offer.titleRoute === 'block_list_pass') line = `${line} | title: block-list`;
+  return line;
 }
 
 // The stored-advert segment on an existing queue line, e.g.
@@ -3372,6 +3374,7 @@ export async function assessFit(job, gate, companyName = '', { jdsDir = JDS_DIR 
     company: job.company || companyName || '',
     title: job.title || '',
     location: job.location || '',
+    titleRoute: job.titleRoute || '',
     advert,
     readStatus: job.readStatus ?? null,
   });
@@ -4263,6 +4266,7 @@ export const SOURCE_DROP_REASONS = [
   { key: 'location', label: 'location' },
   { key: 'age', label: 'age' },
   { key: 'postedDate', label: 'posted date' },
+  { key: 'blockHeld', label: 'block-list cap' },
   { key: 'salary', label: 'salary' },
   // The reader runs here, between the free filters and the three that read the
   // advert. A posting whose own board page says it is gone is dropped rather
@@ -4772,6 +4776,14 @@ const USAGE = `Usage:
   node scan.mjs --quiet                      # suppress the manifesto footer
   node scan.mjs --help                       # print this usage block and exit`;
 
+/** Resolve the title-filter kind for one configured source. */
+export function effectiveSourceKind(entry, { isBoard = false } = {}) {
+  const configured = String(entry?.kind ?? '').trim().toLowerCase();
+  if (configured) return configured;
+  if (isBoard || String(entry?.provider ?? '').trim().toLowerCase() === 'apify') return 'aggregator';
+  return 'company';
+}
+
 async function main() {
   const args = process.argv.slice(2);
   validateFlags(args, KNOWN_FLAGS, USAGE, { valueFlags: VALUE_FLAGS });
@@ -4958,6 +4970,10 @@ async function main() {
   const boards = Array.isArray(config.job_boards) ? config.job_boards : [];
   const titleFilter = buildTitleFilter(config.title_filter);
   const titleDropReason = buildTitleDropReason(config.title_filter);
+  const companyTitleDecision = buildCompanyTitleDecision(config.title_filter);
+  const blockListCap = Number.isInteger(config.title_filter?.block_cap) && config.title_filter.block_cap >= 0
+    ? config.title_filter.block_cap
+    : 40;
 
   // Seniority tier classifier integration
   let classifyTier = null;
@@ -5032,7 +5048,7 @@ async function main() {
       }
       if (filterCompany && !entry.name.toLowerCase().includes(filterCompany)) continue;
 
-      let kind = String(entry.kind ?? '').trim().toLowerCase() || (isBoard ? 'aggregator' : 'company');
+      let kind = effectiveSourceKind(entry, { isBoard });
       if (!['company', 'portfolio', 'aggregator'].includes(kind)) {
         console.warn(`Unknown source kind "${entry.kind}" for ${entry.name}; using company`);
         kind = 'company';
@@ -5108,6 +5124,7 @@ async function main() {
   const dedupIncludeLocation = resolveDedupIncludeLocation(config);
   const dedupSnapshot = loadDedupSnapshot(historyPolicy, canonicalizeCompany, { includeLocation: dedupIncludeLocation });
   const seenUrls = dedupSnapshot.seen;
+  const blockListRunUrls = new Set();
   const seenCompanyRoles = dedupSnapshot.seenCompanyRoles;
   const seenCompanyRoleBases = dedupSnapshot.seenCompanyRoleBases ?? new Set();
 
@@ -5154,12 +5171,15 @@ async function main() {
   let annotatedBlacklisted = 0;
   let totalFilteredVisa = 0;
   let totalDupes = 0;
+  let totalBlockListPassesSent = 0;
+  let totalBlockListPassesHeld = 0;
   const newOffers = [];
   const titleDrops = [];
   const measureSeen = measureTitle ? titleDropHistoryUrls(SCAN_HISTORY_PATH) : null;
   const titleMeasure = Object.fromEntries(['company', 'portfolio', 'aggregator'].map(kind => [kind, {
     total: 0, confirmed: 0, missing_location_only: 0, missing_date_only: 0, missing_both: 0,
   }]));
+  titleMeasure.company.block_list_passes = 0;
   const errors = [...resolveErrors];
   const emptyTargets = [];
 
@@ -5180,6 +5200,8 @@ async function main() {
       errors: errors.length, filteredBlacklist: totalFilteredBlacklist,
       filteredVisa: totalFilteredVisa, filteredPostedDate: totalFilteredPostedDate,
       filteredCountryEligibility: totalFilteredCountryEligibility,
+      blockListPassesSent: totalBlockListPassesSent,
+      blockListPassesHeld: totalBlockListPassesHeld,
     }), (timestamp) => appendScanSources(sourceLedger.records(), timestamp, sourceLogPath));
     // Ctrl-C mid-sweep is the common abort. Best effort: record, then die
     // with the conventional SIGINT code.
@@ -5292,28 +5314,47 @@ async function main() {
           sourceLedger.drop(company.name, 'postedDate');
           continue;
         }
-        if (!titleFilter(job.title)) {
+        const kind = company.kind || (company._isBoard ? 'aggregator' : 'company');
+        const legacyTitleReason = titleDropReason(job.title);
+        const decision = kind === 'company'
+          ? companyTitleDecision(job.title)
+          : { keep: titleFilter(job.title), reason: legacyTitleReason, route: null };
+        if (measureTitle && legacyTitleReason !== null) {
           totalFilteredTitle++;
           sourceLedger.drop(company.name, 'title');
-          const kind = company.kind || (company._isBoard ? 'aggregator' : 'company');
-          if (measureTitle) {
-            const key = normalizeUrlForDedup(job.url);
-            if (key && !measureSeen.has(key)) {
-              measureSeen.add(key);
-              const counts = titleMeasure[kind];
-              const missingLocation = !String(job.location ?? '').trim() && !locationHintFromUrl(job.url);
-              const missingDate = typeof job.postedAt !== 'number' || !Number.isFinite(job.postedAt);
-              counts.total++;
-              const bucket = missingLocation && missingDate ? 'missing_both'
-                : missingLocation ? 'missing_location_only' : missingDate ? 'missing_date_only' : 'confirmed';
-              counts[bucket]++;
+          const key = normalizeUrlForDedup(job.url);
+          if (key && !measureSeen.has(key)) {
+            measureSeen.add(key);
+            const counts = titleMeasure[kind];
+            const missingLocation = !String(job.location ?? '').trim() && !locationHintFromUrl(job.url);
+            const missingDate = typeof job.postedAt !== 'number' || !Number.isFinite(job.postedAt);
+            counts.total++;
+            const bucket = missingLocation && missingDate ? 'missing_both'
+              : missingLocation ? 'missing_location_only' : missingDate ? 'missing_date_only' : 'confirmed';
+            counts[bucket]++;
+            if (kind === 'company' && decision.keep && decision.route === 'block_list_pass') {
+              counts.block_list_passes++;
             }
-          } else {
-            titleDrops.push({ ...job, company: job.company || company.name, kind, reason: titleDropReason(job.title) });
           }
           continue;
         }
         if (measureTitle) continue;
+        if (!decision.keep) {
+          totalFilteredTitle++;
+          sourceLedger.drop(company.name, 'title');
+          titleDrops.push({ ...job, company: job.company || company.name, kind, reason: decision.reason });
+          continue;
+        }
+        if (decision.route) {
+          const earlyDedupUrl = normalizeUrlForDedup(job.url);
+          if (seenUrls.has(earlyDedupUrl) || blockListRunUrls.has(earlyDedupUrl)) {
+            totalDupes++;
+            sourceLedger.drop(company.name, 'duplicate');
+            continue;
+          }
+          blockListRunUrls.add(earlyDedupUrl);
+          job.titleRoute = decision.route;
+        }
         if (!salaryFilter(job.salary)) {
           totalFilteredSalary++;
           sourceLedger.drop(company.name, 'salary');
@@ -5477,6 +5518,14 @@ async function main() {
         // checked. A SKIP leaves the queue only with the SKIP switch on and the
         // company not under always_allow; otherwise it stays, like a REVIEW, as
         // `route: review` with the verdict on the line.
+        if (job.titleRoute === 'block_list_pass') {
+          if (totalBlockListPassesSent >= blockListCap) {
+            totalBlockListPassesHeld++;
+            sourceLedger.drop(company.name, 'blockHeld');
+            continue;
+          }
+          totalBlockListPassesSent++;
+        }
         if (fitGate) {
           const fit = await assessFit(job, fitGate, company.name);
           if (fit.verdict === 'SKIP' && !fit.held) {
@@ -5522,8 +5571,10 @@ async function main() {
     console.log('\nTitle drops: unique normalized URLs absent from scan-history (missing-data columns are separate groups).');
     console.log('kind\ttotal\tconfirmed\tmissing_location_only\tmissing_date_only\tmissing_both');
     for (const [kind, counts] of Object.entries(titleMeasure)) {
-      console.log([kind, ...Object.values(counts)].join('\t'));
+      console.log([kind, counts.total, counts.confirmed, counts.missing_location_only,
+        counts.missing_date_only, counts.missing_both].join('\t'));
     }
+    console.log(`Company-board block-list passes: ${titleMeasure.company.block_list_passes}`);
     if (jsonMode) emitJsonReceipt({ title_measurement: titleMeasure, dry_run: true,
       paid_sources_not_read: paidSourcesNotRead,
       skipped: sourceLedger.records().filter(record => record.status === 'skipped')
@@ -5592,6 +5643,7 @@ async function main() {
     advertEmpty: totalFilteredAdvertEmpty,
     content: totalFilteredContent,
     countryEligibility: totalFilteredCountryEligibility,
+    blockHeld: totalBlockListPassesHeld,
     visa: totalFilteredVisa,
     duplicate: totalDupes,
     cooldown: totalFilteredCooldown,
@@ -5714,6 +5766,9 @@ async function main() {
   }
   if (Object.keys(windows).length > 0 || totalFilteredCooldown > 0) {
     console.log(`Filtered by cooldown:  ${totalFilteredCooldown} removed`);
+  }
+  if (Array.isArray(config.title_filter?.block) || totalBlockListPassesSent > 0 || totalBlockListPassesHeld > 0) {
+    console.log(`Block-list passes:     ${totalBlockListPassesSent} sent on, ${totalBlockListPassesHeld} held for the next run (cap ${blockListCap})`);
   }
   console.log(`Duplicates:            ${totalDupes} skipped`);
   // The read (ticket B1). Printed whenever the reader was asked for anything,
@@ -5945,6 +6000,8 @@ async function main() {
       filteredVisa: totalFilteredVisa,
       filteredPostedDate: totalFilteredPostedDate,
       filteredCountryEligibility: totalFilteredCountryEligibility,
+      blockListPassesSent: totalBlockListPassesSent,
+      blockListPassesHeld: totalBlockListPassesHeld,
     });
   }
   // The run completed (or was a dry run) — disarm the failure row.
@@ -5957,7 +6014,7 @@ async function main() {
     const filtered = totalFilteredTitle + totalFilteredTier + totalFilteredLocation
       + totalFilteredPostingAge + totalFilteredPostedDate + totalFilteredSalary
       + totalFilteredContent + totalFilteredCountryEligibility + totalFilteredBlacklist
-      + totalFilteredVisa + totalFilteredCooldown + totalFilteredFit;
+      + totalFilteredVisa + totalFilteredCooldown + totalFilteredFit + totalBlockListPassesHeld;
     emitJsonReceipt({
       version: 'careerops.scan.receipt@1',
       date,
@@ -5968,6 +6025,8 @@ async function main() {
       duplicates: totalDupes,
       added: verifiedOffers.length,
       added_urls: verifiedOffers.map(offer => offer.url),
+      block_list_passes_sent: totalBlockListPassesSent,
+      block_list_passes_held: totalBlockListPassesHeld,
       errors: errors.map(({ company, error }) => ({ company, error })),
       dry_run: dryRun,
     }, errors.length > 0 ? 2 : 0);

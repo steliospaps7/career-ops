@@ -219,6 +219,7 @@ test('--measure-title counts unique new URLs by kind and separates missing locat
     assert.equal(receipt.dry_run, true);
     assert.deepEqual(receipt.title_measurement.company, {
       total: 6, confirmed: 2, missing_location_only: 1, missing_date_only: 2, missing_both: 1,
+      block_list_passes: 0,
     });
     for (const kind of ['portfolio', 'aggregator']) {
       assert.deepEqual(receipt.title_measurement[kind], {
