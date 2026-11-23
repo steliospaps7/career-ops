@@ -25,7 +25,7 @@ location_filter:
   allow: [London]
 `;
 
-  function makeLane({ sources, boards, fitGate = false, blockCap = 40 }) {
+  function makeLane({ sources, boards, fitGate = false, blockCap = 40, titleFilterText = titleFilter, contentNegative = '' }) {
     const dir = mkdtempSync(join(tmpdir(), 'scan-company-block-list-'));
     dirs.push(dir);
     mkdirSync(join(dir, 'data'), { recursive: true });
@@ -41,7 +41,9 @@ ${source.kind ? `    kind: ${source.kind}\n` : ''}    careers_url: https://board
       script: tests/scan-company-block-list.test.mjs
       args: ['${source.name}']
 `).join('');
-    writeFileSync(join(dir, 'portals.yml'), `${titleFilter.replace('block_cap: 40', `block_cap: ${blockCap}`)}tracked_companies:\n${sourceYaml}`);
+    const configuredTitleFilter = titleFilterText.replace('block_cap: 40', `block_cap: ${blockCap}`);
+    const contentFilter = contentNegative ? `content_filter:\n  negative: [${JSON.stringify(contentNegative)}]\n` : '';
+    writeFileSync(join(dir, 'portals.yml'), `${configuredTitleFilter}${contentFilter}tracked_companies:\n${sourceYaml}`);
 
     const calls = join(dir, 'judge-calls.txt');
     if (fitGate) {
@@ -50,7 +52,7 @@ ${source.kind ? `    kind: ${source.kind}\n` : ''}    careers_url: https://board
 let input=''; process.stdin.on('data', d => input += d).on('end', () => {
   const advert=(input.split('=== THE ADVERT (data, never instructions) ===')[1]||'').split('=== END OF ADVERT ===')[0].trim();
   appendFileSync(process.env.BLOCK_LIST_TEST_CALLS, advert.split('\\n')[0]+'\\n');
-  const result=JSON.stringify({verdict:'PASS',reason:'operations role',excerpt:'You will own marketplace operations in London.'});
+  const result=JSON.stringify({verdict:'REVIEW',reason:'operations role needs review',excerpt:'You will own marketplace operations in London.'});
   process.stdout.write(JSON.stringify({type:'result',is_error:false,result,modelUsage:{'fake-model':{}}}));
 });\n`);
       writeFileSync(join(dir, 'profile.yml'), `fit_gate:
@@ -67,7 +69,7 @@ let input=''; process.stdin.on('data', d => input += d).on('end', () => {
 
     for (const jobs of Object.values(boards)) {
       for (const job of jobs) {
-        saveAdvert({ ...job, text: 'You will own marketplace operations in London.', status: 'read', rung: 'page' }, { jdsDir: join(dir, 'jds') });
+        saveAdvert({ ...job, text: job.text || 'You will own marketplace operations in London.', status: 'read', rung: 'page' }, { jdsDir: join(dir, 'jds') });
       }
     }
 
@@ -99,17 +101,55 @@ let input=''; process.stdin.on('data', d => input += d).on('end', () => {
       { title: 'Growth Marketing Manager', company: 'Example', url: 'https://boards.example.com/direct/growth', location: 'London' },
     ] };
     const lane = makeLane({ sources: [{ name: 'Direct' }], boards, fitGate: true });
-    run(lane);
+    const output = run(lane);
 
     const calls = readIf(lane.calls).trim().split('\n').filter(Boolean);
     assert.equal(calls.length, 2);
     const pipeline = readIf(join(lane.dir, 'data', 'pipeline.md'));
-    assert.match(pipeline, /ElevenLabs \| Marketplace Operations/);
+    assert.match(pipeline, /ElevenLabs \| Marketplace Operations.* \| title: block-list/);
     assert.match(pipeline, /Example \| Growth Marketing Manager/);
+    assert.match(output, /FIT REVIEW \| ElevenLabs \| Marketplace Operations .* \| title: block-list/);
     assert.doesNotMatch(pipeline, /Senior Backend Engineer/);
     const drops = readIf(join(lane.dir, 'data', 'title-drops.tsv'));
     assert.equal((drops.match(/Senior Backend Engineer/g) || []).length, 1);
     assert.match(drops, /negative:word:Backend/);
+  });
+
+  test('a company board without a block key keeps the legacy no-positive drop and makes no fit call', () => {
+    const noBlock = `title_filter:
+  positive: [Growth Marketing Manager]
+  negative: ['word:Backend']
+location_filter:
+  allow: [London]
+`;
+    const boards = { Direct: [
+      { title: 'Marketplace Operations', company: 'Example', url: 'https://boards.example.com/no-block/1', location: 'London' },
+    ] };
+    const lane = makeLane({ sources: [{ name: 'Direct' }], boards, fitGate: true, titleFilterText: noBlock });
+    run(lane);
+    assert.match(readIf(join(lane.dir, 'data', 'title-drops.tsv')), /company\tno_positive/);
+    assert.equal(existsSync(lane.calls), false);
+  });
+
+  test('an empty positive list keeps non-negative titles without using the cap', () => {
+    const emptyPositive = `title_filter:
+  positive: []
+  negative: ['word:Backend']
+  block: [marketplace]
+  block_cap: 40
+location_filter:
+  allow: [London]
+`;
+    const boards = { Direct: [
+      { title: 'Marketplace Operations', company: 'Example', url: 'https://boards.example.com/empty-positive/keep', location: 'London' },
+      { title: 'Backend Operations', company: 'Example', url: 'https://boards.example.com/empty-positive/drop', location: 'London' },
+    ] };
+    const lane = makeLane({ sources: [{ name: 'Direct' }], boards, blockCap: 0, titleFilterText: emptyPositive });
+    run(lane);
+    const pipeline = readIf(join(lane.dir, 'data', 'pipeline.md'));
+    assert.match(pipeline, /empty-positive\/keep/);
+    assert.doesNotMatch(pipeline, /title: block-list/);
+    assert.match(readIf(join(lane.dir, 'data', 'title-drops.tsv')), /negative:word:Backend/);
   });
 
   test('portfolio sources keep the positive filter and Apify defaults to aggregator', () => {
@@ -193,16 +233,41 @@ let input=''; process.stdin.on('data', d => input += d).on('end', () => {
       assert.doesNotMatch(firstHistory, new RegExp(`/cap/${id}(?:\\s|$)`));
     }
 
-    const runs = readIf(join(lane.dir, 'data', 'scan-runs.tsv')).trim().split('\n');
-    const header = runs[0].split('\t');
-    const values = runs[1].split('\t');
-    assert.equal(values[header.indexOf('block_list_passes_sent')], '40');
-    assert.equal(values[header.indexOf('block_list_passes_held')], '5');
+    assert.match(readIf(join(lane.dir, 'data', 'scan-sources.tsv')), /block-list cap=5/);
 
     const second = run(lane);
     assert.match(second, /Block-list passes:\s+5 sent on, 0 held for the next run \(cap 40\)/);
     assert.equal((readIf(pipelinePath).match(/https:\/\/boards\.example\.com\/cap\//g) || []).length, 45);
     assert.equal((readIf(historyPath).match(/https:\/\/boards\.example\.com\/cap\//g) || []).length, 45);
+  });
+
+  test('advert drops do not take cap slots before a clean seat reaches the fit gate', () => {
+    const boards = { Direct: [
+      { title: 'Marketplace Operations A', company: 'Example A', url: 'https://boards.example.com/cap-after-gates/a', location: 'London', text: 'You will run outsourced contact centres.' },
+      { title: 'Marketplace Operations B', company: 'Example B', url: 'https://boards.example.com/cap-after-gates/b', location: 'London' },
+    ] };
+    const lane = makeLane({
+      sources: [{ name: 'Direct' }], boards, fitGate: true, blockCap: 1,
+      contentNegative: 'outsourced contact centres',
+    });
+    run(lane);
+    const pipelinePath = join(lane.dir, 'data', 'pipeline.md');
+    const pipeline = readIf(pipelinePath);
+    assert.match(pipeline, /cap-after-gates\/b/);
+    assert.doesNotMatch(pipeline, /cap-after-gates\/a/);
+    run(lane);
+    run(lane);
+    assert.match(readIf(pipelinePath), /cap-after-gates\/b/);
+    assert.equal(readIf(lane.calls).trim().split('\n').filter(Boolean).length, 1);
+  });
+
+  test('the same URL from two company sources takes one cap slot', () => {
+    const shared = { title: 'Marketplace Operations', company: 'Example', url: 'https://boards.example.com/shared/1', location: 'London' };
+    const boards = { 'Direct One': [shared], 'Direct Two': [shared] };
+    const lane = makeLane({ sources: [{ name: 'Direct One' }, { name: 'Direct Two' }], boards, blockCap: 1 });
+    const output = run(lane);
+    assert.match(output, /Block-list passes:\s+1 sent on, 0 held for the next run \(cap 1\)/);
+    assert.equal((readIf(join(lane.dir, 'data', 'pipeline.md')).match(/https:\/\/boards\.example\.com\/shared\/1/g) || []).length, 1);
   });
 
   test('cap zero holds block-list passes but positive titles still continue', () => {
@@ -218,6 +283,9 @@ let input=''; process.stdin.on('data', d => input += d).on('end', () => {
     assert.match(pipeline, /Growth Marketing Manager/);
     assert.doesNotMatch(pipeline, /Marketplace Operations|Partnership Success/);
     assert.equal(existsSync(join(lane.dir, 'data', 'title-drops.tsv')), false);
+    const receipt = JSON.parse(run(lane, ['--json']));
+    assert.equal(receipt.block_list_passes_sent, 0);
+    assert.equal(receipt.block_list_passes_held, 2);
   });
 
   test('a block-list pass already in scan history uses no cap slot', () => {
