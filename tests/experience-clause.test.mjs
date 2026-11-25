@@ -654,3 +654,21 @@ function only(label, text) {
     else fail(`${label} read ${JSON.stringify(clauses)}, expected a clause at ${expected}`);
   }
 }
+
+// ── 10. A decimal minimum is read whole (ticket 161) ─────────────────
+// The 25 November 2026 runs dropped Teamtailor's Performance Marketing
+// Manager on "1.5+ years of hands-on experience": the reader skipped the "1."
+// and read the "5+" behind it. A decimal is one number, never its last digit.
+
+{
+  const decimals = [
+    ['Teamtailor, the advert line', "What We're Looking For - 1.5+ years of hands-on experience in performance marketing, paid media, or user acquisition, either in-house or at an agency", 1.5],
+    ['a plain decimal', 'You have 2.5 years of experience in growth marketing.', 2.5],
+    ['a decimal range', 'You bring 1.5-3 years of experience in operations.', 1.5],
+    ['a whole number still reads', 'You have 5+ years of experience in performance marketing.', 5],
+  ];
+  for (const [label, text, expected] of decimals) {
+    const c = only(label, text);
+    if (c) eq(`${label}: minimum is ${expected}`, c.minimum, expected);
+  }
+}

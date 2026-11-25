@@ -39,7 +39,10 @@ const NUMBER_WORDS = {
   six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
 };
 
-const NUMBER = `(?:\\d{1,2}|${Object.keys(NUMBER_WORDS).join('|')})`;
+/** A decimal is one number: "1.5+ years" is one and a half, never the "5"
+ * behind the point, which is how the 25 November 2026 runs dropped Teamtailor's
+ * Performance Marketing Manager (ticket 161). */
+const NUMBER = `(?:\\d{1,2}(?:\\.\\d)?|${Object.keys(NUMBER_WORDS).join('|')})`;
 
 /** The hyphen, the en dash, the em dash, the slash and the word, all of them
  * ranges — Pivot's real advert reads "6/8 years of experience".
@@ -64,7 +67,7 @@ const OR_MORE = '(?:\\s*or\\s+(?:more|above|greater|over))?';
  * ninety-five and dropped the row.
  */
 const CLAUSE_RE = new RegExp(
-  `\\b(${NUMBER})\\s*\\+?\\s*(?:${RANGE}\\s*(?:${NUMBER})\\s*\\+?\\s*)?${OR_MORE}\\s*(?:years?|yrs?)\\b\\s*\\+?`,
+  `(?<!\\d\\.)\\b(${NUMBER})\\s*\\+?\\s*(?:${RANGE}\\s*(?:${NUMBER})\\s*\\+?\\s*)?${OR_MORE}\\s*(?:years?|yrs?)\\b\\s*\\+?`,
   'gi',
 );
 
@@ -226,7 +229,7 @@ const COMPANY_CUES = [
 function toNumber(token) {
   const word = token.toLowerCase();
   if (Object.prototype.hasOwnProperty.call(NUMBER_WORDS, word)) return NUMBER_WORDS[word];
-  const n = Number.parseInt(word, 10);
+  const n = Number.parseFloat(word);
   return Number.isFinite(n) ? n : null;
 }
 
