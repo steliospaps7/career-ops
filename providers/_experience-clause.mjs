@@ -41,8 +41,17 @@ const NUMBER_WORDS = {
 
 /** A decimal is one number: "1.5+ years" is one and a half, never the "5"
  * behind the point, which is how the 25 November 2026 runs dropped Teamtailor's
- * Performance Marketing Manager (ticket 161). */
-const NUMBER = `(?:\\d{1,2}(?:\\.\\d{1,2})?|${Object.keys(NUMBER_WORDS).join('|')})`;
+ * Performance Marketing Manager (ticket 161). The decimal mark is a point or a
+ * comma ("1,5 years" in a European advert), with no space after it, so the
+ * list "3, 5, 10 years" stays three numbers. */
+const NUMBER = `(?:\\d{1,2}(?:[.,]\\d{1,2})?|${Object.keys(NUMBER_WORDS).join('|')})`;
+
+/** The tail of a short decimal: one or two digits, not themselves the end of a
+ * longer number, then the mark. A years number never starts right after one,
+ * because the decimal it belongs to is read whole. After a longer number
+ * ("ISO 27001.5+ years", "founded in 2010.5+ years") the point ends that
+ * number and the "5" is read, as before ticket 161. */
+const DECIMAL_TAIL = '(?<!(?<![\\d.,])\\d{1,2}[.,])';
 
 /** The hyphen, the en dash, the em dash, the slash and the word, all of them
  * ranges — Pivot's real advert reads "6/8 years of experience".
@@ -64,13 +73,15 @@ const OR_MORE = '(?:\\s*or\\s+(?:more|above|greater|over))?';
  * The leading `\b` stops the number starting inside a word or a longer number:
  * without it "everyone years of experience" read a minimum of one, from the
  * "one" in "everyone", and "founded in 1995 years of experience" read
- * ninety-five and dropped the row. The `(?<!\d\.)` before it stops a match
- * starting just after a digit and a point, so the tail of a decimal is never
- * read as a number of its own. Its cost: a numbered list flattened with no
- * space ("1.5+ years", from item "1." and "5+ years") now reads 1.5, not 5.
+ * ninety-five and dropped the row. DECIMAL_TAIL before it stops a match
+ * starting inside a short decimal, so its tail is never read as a number of
+ * its own. Its cost: a numbered list flattened with no space ("1.5+ years",
+ * from item "1." and "5+ years"; "2.10+ years") reads as a decimal, 1.5 or
+ * 2.1, not 5 or 10. Scraped text puts a space after a list number, so the
+ * stored adverts do not take this shape.
  */
 const CLAUSE_RE = new RegExp(
-  `(?<!\\d\\.)\\b(${NUMBER})\\s*\\+?\\s*(?:${RANGE}\\s*(?:${NUMBER})\\s*\\+?\\s*)?${OR_MORE}\\s*(?:years?|yrs?)\\b\\s*\\+?`,
+  `${DECIMAL_TAIL}\\b(${NUMBER})\\s*\\+?\\s*(?:${RANGE}\\s*(?:${NUMBER})\\s*\\+?\\s*)?${OR_MORE}\\s*(?:years?|yrs?)\\b\\s*\\+?`,
   'gi',
 );
 
@@ -232,7 +243,7 @@ const COMPANY_CUES = [
 function toNumber(token) {
   const word = token.toLowerCase();
   if (Object.prototype.hasOwnProperty.call(NUMBER_WORDS, word)) return NUMBER_WORDS[word];
-  const n = Number.parseFloat(word);
+  const n = Number.parseFloat(word.replace(',', '.'));
   return Number.isFinite(n) ? n : null;
 }
 

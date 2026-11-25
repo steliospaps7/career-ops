@@ -667,9 +667,19 @@ function only(label, text) {
     ['a decimal range', 'You bring 1.5-3 years of experience in operations.', 1.5],
     ['a whole number still reads', 'You have 5+ years of experience in performance marketing.', 5],
     ['two decimal places', 'You have 5.25 years of experience in operations.', 5.25],
+    ['a decimal comma', 'You have 2,5 years of experience in operations.', 2.5],
+    // After a longer number the point ends that number, and the bar is read as before.
+    ['a standard number run into the bar', 'Our ISO 27001.5+ years of experience in ops required.', 5],
+    ['a year run into the bar', 'Founded in 2010.5+ years of experience required.', 5],
   ];
   for (const [label, text, expected] of decimals) {
     const c = only(label, text);
     if (c) eq(`${label}: minimum is ${expected}`, c.minimum, expected);
   }
+  // A list with a comma and a space is still several numbers, never a decimal.
+  eq('"3, 5, 10 years" is not read as 3.5', extractExperienceClauses('You have 3, 5 or 10 years of experience.').some(c => c.minimum === 3.5), false);
+  // The trade-off, pinned so a later change shows: a numbered list flattened
+  // with no space after the item number reads as a decimal.
+  const listed = only('a list number run into the bar', 'Requirements 2.10+ years of experience in ops.');
+  if (listed) eq('a list number run into the bar reads as the decimal 2.1', listed.minimum, 2.1);
 }

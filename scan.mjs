@@ -2976,7 +2976,9 @@ const YEARS_SEGMENT_RE = /\|\s*years:\s*(\d{1,2}(?:\.\d{1,2})?)(?![\d.])/i;
 
 /** A number of years above zero and below a hundred, whole or decimal, or null. */
 function yearsSegmentValue(value) {
-  const n = typeof value === 'number' ? value : Number.parseFloat(String(value ?? ''));
+  const raw = typeof value === 'number' ? value : Number.parseFloat(String(value ?? ''));
+  // Two decimal places at most, the most YEARS_SEGMENT_RE reads back.
+  const n = Math.round(raw * 100) / 100;
   return Number.isFinite(n) && n > 0 && n < 100 ? n : null;
 }
 
