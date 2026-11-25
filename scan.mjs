@@ -2972,7 +2972,7 @@ export function insertJdSegment(line, relPath, { replace = false } = {}) {
 // The long-shot segment on an existing queue line, e.g. `| years: 4`.
 // A decimal ("years: 4.5") is one value since ticket 161, when the reader
 // began to read "4.5+ years" whole.
-const YEARS_SEGMENT_RE = /\|\s*years:\s*(\d{1,2}(?:\.\d{1,2})?)(?![\d.])/i;
+const YEARS_SEGMENT_RE = /\|\s*years:\s*(\d{1,2}(?:\.\d{1,2})?)(?!\d|\.\d)/i;
 
 /** A number of years above zero and below a hundred, whole or decimal, or null. */
 function yearsSegmentValue(value) {
