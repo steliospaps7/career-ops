@@ -288,6 +288,25 @@ const gate = makeGate();
   eq('and nothing happens when there is nothing to say', insertYearsSegment(bare, null), bare);
 }
 
+// ── 7b. A decimal bar through the gate and onto the line (ticket 161) ──
+// The reader reads "1.5+ years" and "4.5+ years" whole since ticket 161, so
+// the gate keeps both, and a decimal long shot keeps its label.
+
+{
+  const low = gate({ description: 'You have 1.5+ years of hands-on experience in performance marketing.', readStatus: 'read' });
+  eq('a 1.5-year bar is not dropped', low.drop, false);
+  eq('and is no long shot', low.years ?? null, null);
+  const stretch = gate({ description: 'You must have 4.5+ years of experience in operations.', readStatus: 'read' });
+  eq('a 4.5-year bar is not dropped', stretch.drop, false);
+  eq('and is a long shot of 4.5', stretch.years, 4.5);
+  const line = formatPipelineOffer({ url: 'https://example.com/jobs/5', company: 'Acme', title: 'Ops', years: stretch.years });
+  eq('the decimal long shot is written on the line', line, '- [ ] https://example.com/jobs/5 | Acme | Ops | years: 4.5');
+  eq('and reads back whole', extractYearsSegment(line), 4.5);
+  eq('a re-run keeps it', insertYearsSegment(line, 4.5), line);
+  const dropped = gate({ description: 'You must have 5.5 years of experience in operations.', readStatus: 'read' });
+  eq('a 5.5-year bar is still dropped', dropped.drop, true);
+}
+
 {
   const noted = '- [ ] https://example.com/jobs/5 | Acme | PM | note: x';
   eq('with a note but no route, the segment goes before the note', insertYearsSegment(noted, 4), '- [ ] https://example.com/jobs/5 | Acme | PM | years: 4 | note: x');

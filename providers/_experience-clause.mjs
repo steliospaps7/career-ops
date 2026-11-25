@@ -39,7 +39,18 @@ const NUMBER_WORDS = {
   six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
 };
 
-const NUMBER = `(?:\\d{1,2}|${Object.keys(NUMBER_WORDS).join('|')})`;
+/** A decimal is one number: "1.5+ years" is one and a half, never the "5"
+ * behind the point, which is how the 25 November 2026 runs dropped Teamtailor's
+ * Performance Marketing Manager (ticket 161). Only a point is a decimal mark: in
+ * an English advert "4,5 years" is as likely to mean four or five. */
+const NUMBER = `(?:\\d{1,2}(?:\\.\\d{1,2})?|${Object.keys(NUMBER_WORDS).join('|')})`;
+
+/** The tail of a short decimal: one or two digits, not themselves the end of a
+ * longer number, then a point. A years number never starts right after one,
+ * because the decimal it belongs to is read whole. After a longer number
+ * ("ISO 27001.5+ years", "founded in 2010.5+ years") the point ends that
+ * number and the "5" is read, as before ticket 161. */
+const DECIMAL_TAIL = '(?<!(?<![\\d.])\\d{1,2}\\.)';
 
 /** The hyphen, the en dash, the em dash, the slash and the word, all of them
  * ranges — Pivot's real advert reads "6/8 years of experience".
@@ -61,10 +72,16 @@ const OR_MORE = '(?:\\s*or\\s+(?:more|above|greater|over))?';
  * The leading `\b` stops the number starting inside a word or a longer number:
  * without it "everyone years of experience" read a minimum of one, from the
  * "one" in "everyone", and "founded in 1995 years of experience" read
- * ninety-five and dropped the row.
+ * ninety-five and dropped the row. DECIMAL_TAIL before it stops a match
+ * starting inside a short decimal, so its tail is never read as a number of
+ * its own. Its cost: a numbered list flattened with no space ("1.5+ years",
+ * from item "1." and "5+ years"; "2.10+ years") reads as a decimal, 1.5 or
+ * 2.1, not 5 or 10. On 25 November 2026 none of the 38,348 stored adverts took
+ * that shape: all 41 whose reading this change moved are real decimals, such
+ * as "1.5–3 years' experience", that the old reader dropped as five-year bars.
  */
 const CLAUSE_RE = new RegExp(
-  `\\b(${NUMBER})\\s*\\+?\\s*(?:${RANGE}\\s*(?:${NUMBER})\\s*\\+?\\s*)?${OR_MORE}\\s*(?:years?|yrs?)\\b\\s*\\+?`,
+  `${DECIMAL_TAIL}\\b(${NUMBER})\\s*\\+?\\s*(?:${RANGE}\\s*(?:${NUMBER})\\s*\\+?\\s*)?${OR_MORE}\\s*(?:years?|yrs?)\\b\\s*\\+?`,
   'gi',
 );
 
@@ -226,7 +243,7 @@ const COMPANY_CUES = [
 function toNumber(token) {
   const word = token.toLowerCase();
   if (Object.prototype.hasOwnProperty.call(NUMBER_WORDS, word)) return NUMBER_WORDS[word];
-  const n = Number.parseInt(word, 10);
+  const n = Number.parseFloat(word);
   return Number.isFinite(n) ? n : null;
 }
 
