@@ -666,6 +666,7 @@ function only(label, text) {
     ['a plain decimal', 'You have 2.5 years of experience in growth marketing.', 2.5],
     ['a decimal range', 'You bring 1.5-3 years of experience in operations.', 1.5],
     ['a whole number still reads', 'You have 5+ years of experience in performance marketing.', 5],
+    ['two decimal places', 'You have 5.25 years of experience in operations.', 5.25],
   ];
   for (const [label, text, expected] of decimals) {
     const c = only(label, text);
